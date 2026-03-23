@@ -1,16 +1,30 @@
-import React, { useState, useEffect, useRef } from 'react';
-import axios from 'axios';
-import { Send, Users, MessageSquare, Sparkles } from 'lucide-react';
+import React, { useEffect, useRef, useState } from 'react';
+import { Navigate } from 'react-router-dom';
+import { MessageSquare, Send, Sparkles, Users } from 'lucide-react';
+import { useSession } from '../hooks/useSession';
+import { showErrorAlert } from '../lib/alerts';
+import { getApiErrorMessage } from '../lib/api';
+import { messageService } from '../services/messageService';
 import '../styles/Community.css';
 
-const Community = ({ user }) => {
+const emojis = ['😊', '😂', '🔥', '🚀', '🏡', '✨', '👍', '🙏', '💯', '❤️'];
+
+const Community = () => {
+  const scrollRef = useRef(null);
+  const { user, isAuthenticated, loading: sessionLoading } = useSession();
   const [messages, setMessages] = useState([]);
   const [newMessage, setNewMessage] = useState('');
-  const scrollRef = useRef(null);
+  const [loadingMessages, setLoadingMessages] = useState(true);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState('');
 
   useEffect(() => {
+    if (!isAuthenticated) {
+      return;
+    }
+
     fetchMessages();
-  }, []);
+  }, [isAuthenticated]);
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -18,35 +32,45 @@ const Community = ({ user }) => {
     }
   }, [messages]);
 
+  if (!sessionLoading && !isAuthenticated) {
+    return <Navigate to="/login" replace />;
+  }
+
   const fetchMessages = async () => {
+    setLoadingMessages(true);
+    setError('');
+
     try {
-      const res = await axios.get('/api/messages', {
-        headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
-      });
-      setMessages(res.data);
-    } catch (err) {
-      console.error(err);
+      const nextMessages = await messageService.getMessages();
+      setMessages(nextMessages);
+    } catch (requestError) {
+      const message = getApiErrorMessage(requestError, 'Failed to load community messages.');
+      setError(message);
+      await showErrorAlert('Messages Unavailable', message);
+    } finally {
+      setLoadingMessages(false);
     }
   };
 
-  const emojis = ['😊', '😂', '🔥', '🚀', '🏡', '✨', '👍', '🙏', '💯', '❤️'];
+  const handleSendMessage = async (event) => {
+    event.preventDefault();
+    if (!newMessage.trim()) {
+      return;
+    }
 
-  const addEmoji = (emoji) => {
-    setNewMessage(prev => prev + emoji);
-  };
-
-  const handleSendMessage = async (e) => {
-    e.preventDefault();
-    if (!newMessage.trim()) return;
+    setSubmitting(true);
+    setError('');
 
     try {
-      const res = await axios.post('/api/messages', { content: newMessage }, {
-        headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
-      });
-      setMessages([...messages, res.data]);
+      const createdMessage = await messageService.sendMessage({ content: newMessage.trim() });
+      setMessages((currentMessages) => [...currentMessages, createdMessage]);
       setNewMessage('');
-    } catch (err) {
-      console.error(err);
+    } catch (requestError) {
+      const message = getApiErrorMessage(requestError, 'Failed to send your message.');
+      setError(message);
+      await showErrorAlert('Message Failed', message);
+    } finally {
+      setSubmitting(false);
     }
   };
 
@@ -58,9 +82,11 @@ const Community = ({ user }) => {
           <span>Neighbors</span>
         </div>
         <div className="online-users">
-          <h4>Neighbors</h4>
+          <h4>Community Lounge</h4>
           <p className="subtext" style={{ fontSize: '0.8rem', opacity: 0.7, padding: '10px' }}>
-            {user.role === 'landlord' ? 'Manage your community from here.' : 'Connect with your neighbors.'}
+            {user?.role === 'landlord' || user?.role === 'property_manager'
+              ? 'Coordinate tenants, updates, and notices from here.'
+              : 'Connect with your neighbors and management.'}
           </p>
         </div>
       </div>
@@ -73,15 +99,22 @@ const Community = ({ user }) => {
           </div>
           <p>Connect and collaborate with your neighborhood.</p>
         </div>
-        
+
+        {error && <div className="error-msg" style={{ marginBottom: '16px' }}>{error}</div>}
+
         <div className="message-list" ref={scrollRef}>
-          {messages.length > 0 ? messages.map((msg, index) => (
-            <div key={index} className={`message-item ${msg.sender?._id === user?.id ? 'sent' : 'received'}`}>
+          {loadingMessages ? (
+            <div className="flex flex-col items-center justify-center h-full opacity-50">
+              <MessageSquare size={48} />
+              <p>Loading messages...</p>
+            </div>
+          ) : messages.length > 0 ? messages.map((message) => (
+            <div key={message._id} className={`message-item ${message.sender?._id === user?.id ? 'sent' : 'received'}`}>
               <span className="sender-name">
-                {msg.sender?._id === user?.id ? 'You' : msg.sender?.name || 'Anonymous'}
+                {message.sender?._id === user?.id ? 'You' : message.sender?.name || 'Anonymous'}
               </span>
               <div className="message-bubble">
-                {msg.content}
+                {message.content}
               </div>
             </div>
           )) : (
@@ -93,11 +126,11 @@ const Community = ({ user }) => {
         </div>
 
         <div className="emoji-picker glass-card">
-          {emojis.map(emoji => (
-            <button 
-              key={emoji} 
-              type="button" 
-              onClick={() => addEmoji(emoji)}
+          {emojis.map((emoji) => (
+            <button
+              key={emoji}
+              type="button"
+              onClick={() => setNewMessage((currentMessage) => currentMessage + emoji)}
               className="emoji-btn"
             >
               {emoji}
@@ -106,13 +139,13 @@ const Community = ({ user }) => {
         </div>
 
         <form className="chat-input" onSubmit={handleSendMessage}>
-          <input 
-            type="text" 
-            placeholder="Share something with the community..." 
+          <input
+            type="text"
+            placeholder="Share something with the community..."
             value={newMessage}
-            onChange={(e) => setNewMessage(e.target.value)}
+            onChange={(event) => setNewMessage(event.target.value)}
           />
-          <button type="submit" className="btn-primary">
+          <button type="submit" className="btn-primary" disabled={submitting}>
             <Send size={18} />
           </button>
         </form>

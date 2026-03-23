@@ -3,6 +3,7 @@
   height: calc(100vh - 160px);
   gap: 20px;
   animation: fadeIn 0.8s ease-out;
+  min-height: 0;
 }
 
 @keyframes fadeIn {
@@ -69,6 +70,9 @@
 .chat-header h2 {
   font-size: 1.5rem;
   margin-bottom: 5px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .chat-header p {
@@ -133,6 +137,7 @@
   font-size: 0.95rem;
   line-height: 1.5;
   box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
+  word-break: break-word;
 }
 
 .chat-input {
@@ -203,7 +208,76 @@
 }
 
 @media (max-width: 768px) {
+  .community-page {
+    flex-direction: column;
+    gap: 14px;
+    height: auto;
+    min-height: calc(100vh - 160px);
+  }
+
   .community-sidebar {
     display: none;
+  }
+
+  .chat-header,
+  .chat-input,
+  .emoji-picker,
+  .message-list {
+    padding-inline: 18px;
+  }
+
+  .message-item {
+    max-width: 88%;
+  }
+}
+
+@media (max-width: 560px) {
+  .community-page {
+    min-height: auto;
+  }
+
+  .chat-header,
+  .chat-input,
+  .emoji-picker,
+  .message-list {
+    padding-inline: 14px;
+  }
+
+  .chat-header {
+    padding-block: 18px;
+  }
+
+  .chat-header h2 {
+    font-size: 1.12rem;
+    flex-wrap: wrap;
+  }
+
+  .chat-input {
+    flex-direction: column;
+    padding-block: 16px;
+  }
+
+  .chat-input .btn-primary {
+    width: 100%;
+    justify-content: center;
+  }
+
+  .message-item {
+    max-width: 100%;
+  }
+
+  .message-bubble {
+    font-size: 0.9rem;
+    padding: 11px 14px;
+  }
+
+  .emoji-picker {
+    gap: 6px;
+    padding-block: 10px;
+  }
+
+  .emoji-btn {
+    font-size: 1.2rem;
+    padding: 4px;
   }
 }

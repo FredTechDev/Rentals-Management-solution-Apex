@@ -7,7 +7,7 @@
 .main-content {
   flex: 1;
   padding: 2rem;
-  max-width: 1200px;
+  max-width: 1400px;
   margin: 0 auto;
   width: 100%;
 }
@@ -37,13 +37,121 @@
   align-items: center;
 }
 
+.nav-links > .floating-reference {
+  display: inline-flex;
+}
+
 .nav-links a {
   text-decoration: none;
   color: var(--text-muted);
   font-weight: 500;
-  transition: color 0.2s;
+  transition: color 0.2s, transform 0.2s;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
 }
 
 .nav-links a:hover {
   color: var(--text-main);
+  transform: translateY(-1px);
+}
+
+.user-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.85rem;
+  border: 1px solid var(--glass-border);
+  border-radius: 999px;
+  color: var(--text-main);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.user-name small {
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.btn-logout {
+  border: 1px solid var(--glass-border);
+  background: transparent;
+  color: var(--text-main);
+  width: 40px;
+  height: 40px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.btn-logout:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.navbar {
+  position: sticky;
+  top: 0;
+  z-index: 40;
+  box-shadow: 0 12px 30px rgba(2, 6, 23, 0.14);
+}
+
+@media (max-width: 900px) {
+  .navbar {
+    padding: 1rem;
+    flex-direction: column;
+    gap: 1rem;
+    align-items: flex-start;
+  }
+
+  .main-content {
+    padding: 1.25rem;
+  }
+
+  .nav-links {
+    width: 100%;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+  }
+
+  .user-name {
+    order: 1;
+  }
+}
+
+@media (max-width: 560px) {
+  .main-content {
+    padding: 1rem 0.85rem;
+  }
+
+  .nav-logo {
+    font-size: 1.2rem;
+  }
+
+  .nav-links {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .nav-links > .floating-reference {
+    width: 100%;
+  }
+
+  .nav-links > .floating-reference > a,
+  .nav-links > .floating-reference > button {
+    width: 100%;
+    justify-content: center;
+  }
+
+  .user-name {
+    width: 100%;
+    justify-content: space-between;
+    flex-wrap: wrap;
+  }
+
+  .btn-logout {
+    align-self: flex-start;
+  }
 }
