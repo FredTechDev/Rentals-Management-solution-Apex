@@ -53,4 +53,29 @@ const notifyLandlord = async (landlordEmail, tenantName, amount, unit) => {
   }
 };
 
-module.exports = { sendPaymentConfirmation, notifyLandlord };
+const sendAccountCreatedEmail = async (toEmail, userName, password, role) => {
+  const mailOptions = {
+    from: `"Apex Agencies" <${process.env.EMAIL_USER}>`,
+    to: toEmail,
+    subject: 'Welcome to Apex Agencies - Account Created',
+    html: `
+      <h2>Welcome ${userName},</h2>
+      <p>Your account on Apex Agencies has been successfully created as a <strong>${role.replace(/_/g, ' ')}</strong>.</p>
+      <p>Below are your login credentials:</p>
+      <p><strong>Email:</strong> ${toEmail}</p>
+      <p><strong>Temporary Password:</strong> ${password}</p>
+      <br/>
+      <p><strong>Please Note:</strong> You will be required to change this password upon your first login for security purposes.</p>
+      <p>Thank you,</p>
+      <p>The Apex Agencies Team</p>
+    `,
+  };
+
+  try {
+    await transporter.sendMail(mailOptions);
+  } catch (err) {
+    console.error("Account Created Email Error:", err);
+  }
+};
+
+module.exports = { sendPaymentConfirmation, notifyLandlord, sendAccountCreatedEmail };

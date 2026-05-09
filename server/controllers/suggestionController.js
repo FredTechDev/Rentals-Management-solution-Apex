@@ -3,42 +3,37 @@ const { logRequestAudit, truncateAuditText } = require('../helpers/audit');
 const { sendError } = require('../helpers/apiResponse');
 const { ROLES } = require('../helpers/rbac');
 
-const buildManagedPropertyQuery = (user) => {
+const buildManagedPropertyFilter = (user) => {
   if (user.role === ROLES.SUPER_ADMIN) {
     return {};
   }
 
   return {
-    $or: [
-      { landlord: user.id },
-      { manager: user.id }
-    ]
+    landlordId: user.id,
+    managerId: user.id
   };
 };
 
 const createSuggestion = async (req, res) => {
-  const tenant = await Tenant.findOne({ user: req.user.id, status: 'active' });
+  const tenant = await Tenant.findOne(req.schema, { userId: req.user.id, status: 'active' });
   if (!tenant) {
     sendError(res, 403, 'Only active tenants can send suggestions');
     return;
   }
 
-  const suggestion = new Suggestion({
-    organization: tenant.organization,
-    property: tenant.property,
+  const suggestion = await Suggestion.create(req.schema, {
+    propertyId: tenant.property_id,
     content: req.body.content
   });
 
-  await suggestion.save();
-
   await logRequestAudit({
     req,
-    organization: tenant.organization,
+    organization: req.organizationId,
     action: 'Suggestion submitted',
     entityType: 'suggestion',
-    entityId: suggestion._id,
+    entityId: suggestion.id,
     metadata: {
-      propertyId: tenant.property,
+      propertyId: tenant.property_id,
       summary: truncateAuditText(req.body.content, 72)
     }
   });
@@ -47,14 +42,22 @@ const createSuggestion = async (req, res) => {
 };
 
 const getSuggestions = async (req, res) => {
-  const properties = await Property.find(buildManagedPropertyQuery(req.user));
-  const propertyIds = properties.map((property) => property._id);
+  const properties = await Property.find(req.schema, buildManagedPropertyFilter(req.user));
+  const propertyIds = properties.map((property) => property.id);
+  const propertyMap = new Map(properties.map((property) => [property.id, property]));
 
-  const suggestions = await Suggestion.find({
-    property: { $in: propertyIds }
-  }).populate('property', 'name address').sort({ createdAt: -1 });
+  const suggestions = await Suggestion.findByPropertyIds(req.schema, propertyIds);
 
-  res.json(suggestions);
+  res.json(suggestions.map((suggestion) => ({
+    ...suggestion,
+    property: propertyMap.get(suggestion.property_id)
+      ? {
+        id: propertyMap.get(suggestion.property_id).id,
+        name: propertyMap.get(suggestion.property_id).name,
+        address: propertyMap.get(suggestion.property_id).address
+      }
+      : null
+  })));
 };
 
 module.exports = {

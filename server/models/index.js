@@ -1,5 +1,6 @@
 module.exports = {
   Organization: require('./Organization'),
+  OrganizationMembership: require('./OrganizationMembership'),
   User: require('./User'),
   Property: require('./Property'),
   Unit: require('./Unit'),

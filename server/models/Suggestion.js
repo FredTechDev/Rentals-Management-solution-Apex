@@ -1,10 +1,24 @@
-const mongoose = require('mongoose');
+const { tenantQuery } = require('../config/database');
 
-const suggestionSchema = new mongoose.Schema({
-  organization: { type: mongoose.Schema.Types.ObjectId, ref: 'Organization' },
-  property: { type: mongoose.Schema.Types.ObjectId, ref: 'Property', required: true },
-  content: { type: String, required: true, trim: true },
-  createdAt: { type: Date, default: Date.now }
-});
+class Suggestion {
+  static async create(schema, data) {
+    const res = await tenantQuery(schema,
+      `INSERT INTO suggestions (property_id, content)
+       VALUES ($1,$2)
+       RETURNING *`,
+      [data.propertyId, data.content]
+    );
+    return res.rows[0];
+  }
 
-module.exports = mongoose.models.Suggestion || mongoose.model('Suggestion', suggestionSchema);
+  static async findByPropertyIds(schema, propertyIds) {
+    if (!propertyIds?.length) return [];
+    const res = await tenantQuery(schema,
+      `SELECT * FROM suggestions WHERE property_id = ANY($1::uuid[]) ORDER BY created_at DESC`,
+      [propertyIds]
+    );
+    return res.rows;
+  }
+}
+
+module.exports = Suggestion;

@@ -22,10 +22,7 @@
 
 body {
   background: var(--bg-dark);
-  background-image: 
-    radial-gradient(at 0% 0%, hsla(253,16%,7%,1) 0, transparent 50%), 
-    radial-gradient(at 50% 0%, hsla(225,39%,30%,1) 0, transparent 50%), 
-    radial-gradient(at 100% 0%, hsla(339,49%,30%,1) 0, transparent 50%);
+  background-image: var(--bg-image);
   color: var(--text-main);
   min-height: 100vh;
   overflow-x: hidden;
@@ -40,10 +37,10 @@ textarea {
 }
 
 select {
-  color-scheme: dark;
+  color-scheme: var(--color-scheme);
   background-image:
-    linear-gradient(45deg, transparent 50%, #7dd3fc 50%),
-    linear-gradient(135deg, #7dd3fc 50%, transparent 50%);
+    linear-gradient(45deg, transparent 50%, var(--primary) 50%),
+    linear-gradient(135deg, var(--primary) 50%, transparent 50%);
   background-position:
     calc(100% - 18px) calc(50% - 2px),
     calc(100% - 12px) calc(50% - 2px);
@@ -54,8 +51,8 @@ select {
 
 select option,
 select optgroup {
-  background: #0f172a;
-  color: #e2e8f0;
+  background: var(--surface-strong);
+  color: var(--text-main);
 }
 
 .glass-card {

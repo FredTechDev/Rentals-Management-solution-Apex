@@ -1,4 +1,4 @@
-const { MpesaTransaction, Payment, Property, Tenant, User } = require('../models');
+const { MpesaTransaction, Payment, Property, Tenant, User, Organization } = require('../models');
 const { logAudit, logRequestAudit } = require('../helpers/audit');
 const { sendError } = require('../helpers/apiResponse');
 const { createNotification } = require('../helpers/notifications');
@@ -6,32 +6,56 @@ const { initiateSTKPush } = require('../services/mpesaService');
 const { notifyLandlord, sendPaymentConfirmation } = require('../services/emailService');
 const { ROLES } = require('../helpers/rbac');
 
+const canManageProperty = (user, property) => Boolean(property) && (
+  user.role === ROLES.SUPER_ADMIN
+  || property.landlord_id === user.id
+  || property.manager_id === user.id
+);
+
 const getPayments = async (req, res) => {
   let payments;
 
   if ([ROLES.LANDLORD, ROLES.PROPERTY_MANAGER, ROLES.SUPER_ADMIN].includes(req.user.role)) {
-    const propertyQuery = req.user.role === ROLES.SUPER_ADMIN
+    const filter = req.user.role === ROLES.SUPER_ADMIN
       ? {}
-      : { $or: [{ landlord: req.user.id }, { manager: req.user.id }] };
+      : { landlordId: req.user.id, managerId: req.user.id };
+    const properties = await Property.find(req.schema, filter);
+    const propertyIds = properties.map((property) => property.id);
+    const tenants = await Tenant.find(req.schema, { propertyIds });
+    const tenantIds = tenants.map((tenant) => tenant.id);
 
-    const properties = await Property.find(propertyQuery);
-    const propertyIds = properties.map((property) => property._id);
-    const tenants = await Tenant.find({ property: { $in: propertyIds } });
-    const tenantIds = tenants.map((tenant) => tenant._id);
+    payments = await Payment.findByTenantIds(req.schema, tenantIds);
+    const tenantMap = new Map(tenants.map((tenant) => [tenant.id, tenant]));
+    const users = await User.findByIds(tenants.map((tenant) => tenant.user_id));
+    const userMap = new Map(users.map((user) => [user.id, user]));
 
-    payments = await Payment.find({ tenant: { $in: tenantIds } })
-      .populate({ path: 'tenant', populate: { path: 'user', select: 'name email' } })
-      .sort({ createdAt: -1 });
+    payments = payments.map((payment) => {
+      const tenant = tenantMap.get(payment.tenant_id);
+      const user = tenant ? userMap.get(tenant.user_id) : null;
+      return {
+        ...payment,
+        tenant: tenant ? {
+          ...tenant,
+          user: user ? { id: user.id, name: user.name, email: user.email } : null
+        } : null
+      };
+    });
   } else {
-    const tenant = await Tenant.findOne({ user: req.user.id });
+    const tenant = await Tenant.findOne(req.schema, { userId: req.user.id });
     if (!tenant) {
       res.json([]);
       return;
     }
 
-    payments = await Payment.find({ tenant: tenant._id })
-      .populate({ path: 'tenant', populate: { path: 'user', select: 'name email' } })
-      .sort({ createdAt: -1 });
+    payments = await Payment.findByTenantId(req.schema, tenant.id);
+    const user = await User.findById(tenant.user_id);
+    payments = payments.map((payment) => ({
+      ...payment,
+      tenant: {
+        ...tenant,
+        user: user ? { id: user.id, name: user.name, email: user.email } : null
+      }
+    }));
   }
 
   res.json(payments);
@@ -40,9 +64,9 @@ const getPayments = async (req, res) => {
 const initiatePaymentStkPush = async (req, res) => {
   const { amount, phoneNumber, tenantId } = req.body;
 
-  let tenant = await Tenant.findById(tenantId).populate('user property');
+  let tenant = await Tenant.findById(req.schema, tenantId);
   if (!tenant) {
-    tenant = await Tenant.findOne({ user: tenantId }).populate('user property');
+    tenant = await Tenant.findOne(req.schema, { userId: tenantId });
   }
 
   if (!tenant) {
@@ -50,11 +74,36 @@ const initiatePaymentStkPush = async (req, res) => {
     return;
   }
 
-  const response = await initiateSTKPush(phoneNumber, amount, `Tenant-${tenant.user?._id || tenantId}`);
+  const organization = await Organization.findById(req.organizationId);
+  const user = await User.findById(tenant.user_id);
+  const property = await Property.findById(req.schema, tenant.property_id);
+  if (!property) {
+    sendError(res, 404, 'Property not found');
+    return;
+  }
 
-  const transaction = new MpesaTransaction({
-    organization: tenant.organization || tenant.property?.organization,
-    tenant: tenant._id,
+  if (req.user.role === ROLES.TENANT && tenant.user_id !== req.user.id) {
+    sendError(res, 403, 'You can only pay for your own tenant account');
+    return;
+  }
+
+  if (req.user.role !== ROLES.TENANT && !canManageProperty(req.user, property)) {
+    sendError(res, 403, 'You do not have permission to initiate payments for this tenant');
+    return;
+  }
+
+  const mpesaConfig = {
+    mpesa_shortcode: organization.mpesa_shortcode,
+    mpesa_consumer_key: organization.mpesa_consumer_key,
+    mpesa_consumer_secret: organization.mpesa_consumer_secret,
+    mpesa_passkey: organization.mpesa_passkey,
+    mpesa_callback_url: process.env.MPESA_CALLBACK_URL // Keep platform callback for unified tracking
+  };
+
+  const response = await initiateSTKPush(phoneNumber, amount, `Tenant-${tenant.user_id || tenantId}`, mpesaConfig);
+
+  const transaction = await MpesaTransaction.create(req.schema, {
+    tenantId: tenant.id,
     merchantRequestId: response.MerchantRequestID,
     checkoutRequestId: response.CheckoutRequestID,
     phoneNumber,
@@ -62,17 +111,11 @@ const initiatePaymentStkPush = async (req, res) => {
     status: 'pending'
   });
 
-  await transaction.save();
-
-  let payment = await Payment.findOne({
-    tenant: tenant._id,
-    status: 'pending'
-  }).sort({ createdAt: -1 });
+  let payment = await Payment.findPendingByTenant(req.schema, tenant.id);
 
   if (!payment) {
-    payment = new Payment({
-      organization: tenant.organization || tenant.property?.organization,
-      tenant: tenant._id,
+    payment = await Payment.create(req.schema, {
+      tenantId: tenant.id,
       amount,
       dueDate: new Date(),
       status: 'pending',
@@ -80,20 +123,21 @@ const initiatePaymentStkPush = async (req, res) => {
     });
   }
 
-  payment.amount = amount;
-  payment.reference = response.CheckoutRequestID;
-  payment.mpesaTransaction = transaction._id;
-  payment.method = 'mpesa';
-  await payment.save();
+  payment = await Payment.update(req.schema, payment.id, {
+    amount,
+    reference: response.CheckoutRequestID,
+    mpesa_transaction_id: transaction.id,
+    method: 'mpesa'
+  });
 
   await logRequestAudit({
     req,
-    organization: tenant.organization || tenant.property?.organization,
+    organization: req.organizationId,
     action: 'Payment checkout started',
     entityType: 'payment',
-    entityId: payment._id,
+    entityId: payment.id,
     metadata: {
-      tenantName: tenant.user?.name || '',
+      tenantName: user?.name || '',
       summary: `KSh ${amount} • ${phoneNumber}`,
       checkoutRequestId: response.CheckoutRequestID
     }
@@ -105,6 +149,66 @@ const initiatePaymentStkPush = async (req, res) => {
   });
 };
 
+const getPaymentSettings = async (req, res) => {
+  if (req.user.role !== ROLES.LANDLORD && req.user.role !== ROLES.SUPER_ADMIN) {
+    return sendError(res, 403, 'Only landlords can access payment settings');
+  }
+
+  const organization = await Organization.findById(req.organizationId);
+  res.json({
+    mpesaShortcode: organization.mpesa_shortcode,
+    mpesaConsumerKey: organization.mpesa_consumer_key,
+    mpesaConsumerSecret: organization.mpesa_consumer_secret ? '********' : null,
+    mpesaPasskey: organization.mpesa_passkey ? '********' : null,
+    bankDetails: organization.bank_details || {},
+    paymentMethods: organization.payment_methods || ['mpesa']
+  });
+};
+
+const updatePaymentSettings = async (req, res) => {
+  if (req.user.role !== ROLES.LANDLORD && req.user.role !== ROLES.SUPER_ADMIN) {
+    return sendError(res, 403, 'Only landlords can update payment settings');
+  }
+
+  const { mpesaShortcode, mpesaConsumerKey, mpesaConsumerSecret, mpesaPasskey, bankDetails, paymentMethods } = req.body;
+  
+  const updates = {};
+  if (mpesaShortcode !== undefined) updates.mpesa_shortcode = mpesaShortcode;
+  if (mpesaConsumerKey !== undefined) updates.mpesa_consumer_key = mpesaConsumerKey;
+  if (mpesaConsumerSecret !== undefined) updates.mpesa_consumer_secret = mpesaConsumerSecret;
+  if (mpesaPasskey !== undefined) updates.mpesa_passkey = mpesaPasskey;
+  if (bankDetails !== undefined) updates.bank_details = bankDetails;
+  if (paymentMethods !== undefined) updates.payment_methods = paymentMethods;
+
+  const organization = await Organization.update(req.organizationId, updates);
+
+  await logRequestAudit({
+    req,
+    organization: req.organizationId,
+    action: 'Payment settings updated',
+    entityType: 'organization',
+    entityId: req.organizationId,
+    metadata: {
+      summary: 'Payment credentials updated'
+    }
+  });
+
+  res.json({ 
+    message: 'Payment settings updated successfully',
+    paymentMethods: organization.payment_methods 
+  });
+};
+
+const getLandlordPaymentMethods = async (req, res) => {
+  const organization = await Organization.findById(req.organizationId);
+  res.json({
+    paymentMethods: organization.payment_methods || ['mpesa'],
+    bankDetails: (organization.payment_methods || []).includes('bank_transfer') 
+      ? organization.bank_details 
+      : null
+  });
+};
+
 const handleMpesaCallback = async (req, res) => {
   const callbackData = req.body?.Body?.stkCallback;
   if (!callbackData) {
@@ -113,92 +217,118 @@ const handleMpesaCallback = async (req, res) => {
   }
 
   const { CheckoutRequestID, ResultCode, ResultDesc, MerchantRequestID } = callbackData;
-  const transaction = await MpesaTransaction.findOne({ checkoutRequestId: CheckoutRequestID });
+  const organizations = await Organization.findAll();
+  let transaction = null;
+  let schemaName = null;
+  let organizationId = null;
 
-  if (!transaction) {
+  for (const org of organizations) {
+    if (!org.schema_name || !['trial', 'active'].includes(org.status)) continue;
+    let match = null;
+    try {
+      match = await MpesaTransaction.findByCheckoutRequestId(org.schema_name, CheckoutRequestID);
+    } catch (error) {
+      continue;
+    }
+    if (match) {
+      transaction = match;
+      schemaName = org.schema_name;
+      organizationId = org.id;
+      break;
+    }
+  }
+
+  if (!transaction || !schemaName) {
     sendError(res, 404, 'Transaction not found');
     return;
   }
 
-  transaction.merchantRequestId = MerchantRequestID;
-  transaction.resultCode = Number(ResultCode);
-  transaction.resultDesc = ResultDesc;
+  const updates = {
+    merchant_request_id: MerchantRequestID,
+    result_code: Number(ResultCode),
+    result_desc: ResultDesc
+  };
 
   if (Number(ResultCode) === 0) {
     const metadata = callbackData.CallbackMetadata?.Item || [];
-    transaction.mpesaReceiptNumber = metadata.find((item) => item.Name === 'MpesaReceiptNumber')?.Value;
-    transaction.transactionDate = new Date();
-    transaction.status = 'completed';
-    await transaction.save();
+    updates.mpesa_receipt_number = metadata.find((item) => item.Name === 'MpesaReceiptNumber')?.Value || null;
+    updates.transaction_date = new Date();
+    updates.status = 'completed';
+    transaction = await MpesaTransaction.update(schemaName, transaction.id, updates);
 
-    const payment = await Payment.findOne({ mpesaTransaction: transaction._id })
-      || await Payment.findOne({ tenant: transaction.tenant, status: 'pending' }).sort({ createdAt: -1 });
+    let payment = await Payment.findByMpesaTransactionId(schemaName, transaction.id);
+    if (!payment && transaction.tenant_id) {
+      payment = await Payment.findPendingByTenant(schemaName, transaction.tenant_id);
+    }
 
     if (payment) {
-      payment.status = 'paid';
-      payment.paymentDate = new Date();
-      payment.mpesaTransaction = transaction._id;
-      payment.reference = transaction.mpesaReceiptNumber || payment.reference;
-      await payment.save();
+      payment = await Payment.update(schemaName, payment.id, {
+        status: 'paid',
+        payment_date: new Date(),
+        mpesa_transaction_id: transaction.id,
+        reference: transaction.mpesa_receipt_number || payment.reference
+      });
 
-      const tenant = await Tenant.findById(payment.tenant).populate('user property');
-      const landlord = tenant?.property?.landlord ? await User.findById(tenant.property.landlord) : null;
+      const tenant = transaction.tenant_id ? await Tenant.findById(schemaName, transaction.tenant_id) : null;
+      const tenantUser = tenant ? await User.findById(tenant.user_id) : null;
+      const property = tenant ? await Property.findById(schemaName, tenant.property_id) : null;
+      const landlord = property?.landlord_id ? await User.findById(property.landlord_id) : null;
 
-      if (tenant?.user?.email) {
+      if (tenantUser?.email) {
         await sendPaymentConfirmation(
-          tenant.user.email,
-          tenant.user.name,
+          tenantUser.email,
+          tenantUser.name,
           transaction.amount,
-          transaction.mpesaReceiptNumber
+          transaction.mpesa_receipt_number
         );
       }
 
-      if (landlord?.email) {
-        await notifyLandlord(landlord.email, tenant.user.name, transaction.amount, tenant.unit);
+      if (landlord?.email && tenantUser) {
+        await notifyLandlord(landlord.email, tenantUser.name, transaction.amount, tenant?.unit || '');
       }
 
-      if (tenant?.user?._id) {
+      if (tenantUser?.id) {
         await createNotification({
-          organization: tenant.organization || tenant.property?.organization,
-          user: tenant.user._id,
+          schema: schemaName,
+          userId: tenantUser.id,
           title: 'Payment confirmed',
           message: `Payment of KSh ${transaction.amount} has been confirmed.`,
           type: 'payment_confirmation'
         });
       }
 
-      if (landlord?._id) {
+      if (landlord?.id && tenantUser) {
         await createNotification({
-          organization: tenant.organization || tenant.property?.organization,
-          user: landlord._id,
+          schema: schemaName,
+          userId: landlord.id,
           title: 'Rent payment received',
-          message: `${tenant.user.name} has paid KSh ${transaction.amount} for unit ${tenant.unit}.`,
+          message: `${tenantUser.name} has paid KSh ${transaction.amount} for unit ${tenant?.unit || ''}.`,
           type: 'payment_confirmation'
         });
       }
 
       await logAudit({
-        organization: tenant?.organization || tenant?.property?.organization || transaction.organization || null,
-        actor: tenant?.user?._id || null,
+        organization: organizationId,
+        actor: tenantUser?.id || null,
         action: 'Payment confirmed',
         entityType: 'payment',
-        entityId: payment._id,
+        entityId: payment.id,
         metadata: {
-          tenantName: tenant?.user?.name || '',
-          summary: `KSh ${transaction.amount} • ${tenant?.user?.name || 'tenant'}`,
-          reference: transaction.mpesaReceiptNumber || payment.reference
+          tenantName: tenantUser?.name || '',
+          summary: `KSh ${transaction.amount} • ${tenantUser?.name || 'tenant'}`,
+          reference: transaction.mpesa_receipt_number || payment.reference
         }
       });
     }
   } else {
-    transaction.status = 'failed';
-    await transaction.save();
+    updates.status = 'failed';
+    await MpesaTransaction.update(schemaName, transaction.id, updates);
 
     await logAudit({
-      organization: transaction.organization || null,
+      organization: organizationId,
       action: 'Payment failed',
       entityType: 'payment',
-      entityId: transaction._id,
+      entityId: transaction.id,
       metadata: {
         summary: ResultDesc || 'M-Pesa callback failed',
         checkoutRequestId: CheckoutRequestID
@@ -212,5 +342,8 @@ const handleMpesaCallback = async (req, res) => {
 module.exports = {
   getPayments,
   initiatePaymentStkPush,
-  handleMpesaCallback
+  handleMpesaCallback,
+  getPaymentSettings,
+  updatePaymentSettings,
+  getLandlordPaymentMethods
 };

@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Activity,
@@ -12,13 +12,15 @@ import {
   Home,
   LayoutDashboard,
   MapPin,
+  Menu,
   MessageCircle,
   Plus,
   ScrollText,
   Sparkles,
   Upload,
   Users,
-  Wrench
+  Wrench,
+  X
 } from 'lucide-react';
 import AnimatedSection from '../components/AnimatedSection';
 import FloatingHint from '../components/FloatingHint';
@@ -303,52 +305,101 @@ const WorkspaceShell = ({
   subtitle,
   title,
   children
-}) => (
-  <div className="workspace-shell">
-    <aside className="workspace-sidebar glass-card">
-      <div className="workspace-sidebar-header">
-        <span className="workspace-sidebar-kicker">Workspace</span>
-        <h2>{title}</h2>
-        <p>{subtitle}</p>
+}) => {
+  const [navOpen, setNavOpen] = useState(false);
+  const mainRef = useRef(null);
+  const activeSectionMeta = sections.find((section) => section.id === activeSection);
+
+  useEffect(() => {
+    setNavOpen(false);
+  }, [activeSection]);
+
+  const scrollWorkspaceIntoView = () => {
+    if (!mainRef.current) {
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+      return;
+    }
+
+    const nextTop = mainRef.current.getBoundingClientRect().top + window.scrollY - 96;
+    window.scrollTo({
+      top: Math.max(nextTop, 0),
+      behavior: 'smooth'
+    });
+  };
+
+  const handleSectionSelect = (sectionId) => {
+    onSelect(sectionId);
+    setNavOpen(false);
+
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(scrollWorkspaceIntoView);
+    });
+  };
+
+  return (
+    <div className="workspace-shell">
+      <div className="workspace-mobile-bar glass-card">
+        <button
+          type="button"
+          className="workspace-menu-toggle"
+          onClick={() => setNavOpen((currentState) => !currentState)}
+          aria-expanded={navOpen}
+          aria-controls="workspace-sidebar-nav"
+        >
+          {navOpen ? <X size={18} /> : <Menu size={18} />}
+          <span>{navOpen ? 'Close Sections' : 'Open Sections'}</span>
+        </button>
+        <span className="workspace-mobile-label">{activeSectionMeta?.label || title}</span>
       </div>
 
-      <div className="workspace-nav">
-        {sections.map((section) => {
-          const Icon = section.icon;
-          const isActive = activeSection === section.id;
+      <aside
+        id="workspace-sidebar-nav"
+        className={`workspace-sidebar glass-card ${navOpen ? 'is-open' : ''}`}
+      >
+        <div className="workspace-sidebar-header">
+          <span className="workspace-sidebar-kicker">Workspace</span>
+          <h2>{title}</h2>
+          <p>{subtitle}</p>
+        </div>
 
-          return (
-            <button
-              key={section.id}
-              type="button"
-              className={`workspace-nav-btn ${isActive ? 'active' : ''}`}
-              onClick={() => onSelect(section.id)}
-            >
-              <span className="workspace-nav-icon">
-                <Icon size={18} />
-              </span>
-              <span className="workspace-nav-copy">
-                <span className="workspace-nav-label">{section.label}</span>
-                <span className="workspace-nav-note">{section.note}</span>
-              </span>
-              {section.badge !== undefined && section.badge !== null && (
-                <span className={`workspace-nav-badge ${isActive ? 'active' : ''}`}>
-                  {section.badge}
+        <div className="workspace-nav">
+          {sections.map((section) => {
+            const Icon = section.icon;
+            const isActive = activeSection === section.id;
+
+            return (
+              <button
+                key={section.id}
+                type="button"
+                className={`workspace-nav-btn ${isActive ? 'active' : ''}`}
+                onClick={() => handleSectionSelect(section.id)}
+              >
+                <span className="workspace-nav-icon">
+                  <Icon size={18} />
                 </span>
-              )}
-            </button>
-          );
-        })}
+                <span className="workspace-nav-copy">
+                  <span className="workspace-nav-label">{section.label}</span>
+                  <span className="workspace-nav-note">{section.note}</span>
+                </span>
+                {section.badge !== undefined && section.badge !== null && (
+                  <span className={`workspace-nav-badge ${isActive ? 'active' : ''}`}>
+                    {section.badge}
+                  </span>
+                )}
+              </button>
+            );
+          })}
+        </div>
+
+        {footer && <div className="workspace-sidebar-footer">{footer}</div>}
+      </aside>
+
+      <div ref={mainRef} className="workspace-main">
+        {children}
       </div>
-
-      {footer && <div className="workspace-sidebar-footer">{footer}</div>}
-    </aside>
-
-    <div className="workspace-main">
-      {children}
     </div>
-  </div>
-);
+  );
+};
 
 const ActivityLogSection = ({ logs }) => (
   <AnimatedSection as="section" className="activity-log-section" delay={100}>

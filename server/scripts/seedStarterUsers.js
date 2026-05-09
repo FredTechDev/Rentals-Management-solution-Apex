@@ -1,17 +1,19 @@
 const fs = require('fs');
 const path = require('path');
-const { connectDatabase, mongoose } = require('../config/database');
-const { mongodbUri, uploadsRoot } = require('../config/env');
+const { connectDatabase } = require('../config/database');
+const { runPublicMigrations } = require('../database');
+const { uploadsRoot } = require('../config/env');
 const {
   Lease,
-  Notification,
   Payment,
   Property,
   Tenant,
   Unit,
-  User
+  User,
+  Organization
 } = require('../models');
 const { ensureOrganizationForUser } = require('../helpers/organization');
+const { createNotification } = require('../helpers/notifications');
 const { ROLES } = require('../helpers/rbac');
 
 const tenantEmail = (process.env.TENANT_EMAIL || 'kamau1@gmail.com').trim().toLowerCase();
@@ -27,50 +29,30 @@ const rentAmount = Number(process.env.STARTER_RENT_AMOUNT || 25000);
 
 const buildLeaseFileName = (email) => `${email.replace(/[^a-z0-9]+/gi, '-').toLowerCase()}-lease.txt`;
 
-const upsertUser = async ({ email, name, organization = null, role, status }) => {
-  let user = await User.findOne({ email });
+const upsertUser = async ({ email, name, organizationId = null, role, status }) => {
+  let user = await User.findByEmail(email);
 
   if (!user) {
-    user = new User({
+    user = await User.create({
       name,
       email,
       password,
       role,
       status,
-      organization
+      organizationId
     });
   } else {
-    user.name = name;
-    user.password = password;
-    user.role = role;
-    user.status = status;
-    user.isActive = true;
-    user.organization = organization;
+    user = await User.update(user.id, {
+      name,
+      password,
+      role,
+      status,
+      is_active: true,
+      organization_id: organizationId
+    });
   }
 
-  await user.save();
   return user;
-};
-
-const upsertNotification = async ({ organization, user, title, message, type = 'system_notice' }) => {
-  const existing = await Notification.findOne({ user, title });
-
-  if (existing) {
-    existing.message = message;
-    existing.organization = organization;
-    existing.type = type;
-    existing.isRead = false;
-    await existing.save();
-    return existing;
-  }
-
-  return Notification.create({
-    organization,
-    user,
-    title,
-    message,
-    type
-  });
 };
 
 const seedStarterUsers = async () => {
@@ -78,7 +60,8 @@ const seedStarterUsers = async () => {
     throw new Error('TENANT_EMAIL, LANDLORD_EMAIL, and USER_PASSWORD must be set.');
   }
 
-  await connectDatabase(mongodbUri);
+  await connectDatabase();
+  await runPublicMigrations();
 
   let landlord = await upsertUser({
     email: landlordEmail,
@@ -88,101 +71,80 @@ const seedStarterUsers = async () => {
   });
 
   const organizationId = await ensureOrganizationForUser(landlord, `${landlordName}'s Portfolio`);
-  landlord = await User.findById(landlord._id);
+  const organization = await Organization.findById(organizationId);
+  const schema = organization.schema_name;
+  landlord = await User.findById(landlord.id);
 
-  let property = await Property.findOne({
-    organization: organizationId,
-    name: propertyName
-  });
-
+  let property = await Property.findByName(schema, propertyName);
   if (!property) {
-    property = new Property({
-      organization: organizationId,
+    property = await Property.create(schema, {
       name: propertyName,
       address: propertyAddress,
       description: 'Starter property for landlord and tenant testing.',
       type: 'apartment',
-      landlord: landlord._id,
+      landlordId: landlord.id,
       units: [occupiedUnitNumber, vacantUnitNumber]
     });
   } else {
-    property.organization = organizationId;
-    property.address = propertyAddress;
-    property.description = 'Starter property for landlord and tenant testing.';
-    property.type = 'apartment';
-    property.landlord = landlord._id;
-    property.units = [occupiedUnitNumber, vacantUnitNumber];
+    property = await Property.update(schema, property.id, {
+      address: propertyAddress,
+      description: 'Starter property for landlord and tenant testing.',
+      type: 'apartment',
+      landlord_id: landlord.id,
+      units: [occupiedUnitNumber, vacantUnitNumber]
+    });
   }
-
-  await property.save();
 
   let tenantUser = await upsertUser({
     email: tenantEmail,
     name: tenantName,
-    organization: organizationId,
+    organizationId,
     role: ROLES.TENANT,
     status: 'active'
   });
 
-  tenantUser.interestedProperty = property._id;
-  tenantUser.interestedUnit = occupiedUnitNumber;
-  await tenantUser.save();
+  tenantUser = await User.update(tenantUser.id, {
+    interested_property_id: property.id,
+    interested_property_schema: schema,
+    interested_unit: occupiedUnitNumber
+  });
 
-  let tenant = await Tenant.findOne({ user: tenantUser._id });
-
+  let tenant = await Tenant.findOne(schema, { userId: tenantUser.id });
   if (!tenant) {
-    tenant = new Tenant({
-      organization: organizationId,
-      user: tenantUser._id,
-      property: property._id,
+    tenant = await Tenant.create(schema, {
+      userId: tenantUser.id,
+      propertyId: property.id,
       unit: occupiedUnitNumber,
       rentAmount,
       dueDate: 5,
       status: 'active'
     });
   } else {
-    tenant.organization = organizationId;
-    tenant.property = property._id;
-    tenant.unit = occupiedUnitNumber;
-    tenant.rentAmount = rentAmount;
-    tenant.dueDate = 5;
-    tenant.status = 'active';
+    tenant = await Tenant.update(schema, tenant.id, {
+      property_id: property.id,
+      unit: occupiedUnitNumber,
+      rent_amount: rentAmount,
+      due_date: 5,
+      status: 'active'
+    });
   }
 
-  await tenant.save();
-
-  await Unit.findOneAndUpdate({
-    property: property._id,
-    unitNumber: occupiedUnitNumber
-  }, {
-    organization: organizationId,
-    property: property._id,
+  await Unit.upsert(schema, {
+    propertyId: property.id,
     unitNumber: occupiedUnitNumber,
     rentAmount,
     occupancyStatus: 'occupied',
-    tenantAssignment: tenant._id,
+    tenantAssignment: tenant.id,
     isActive: true
-  }, {
-    upsert: true,
-    returnDocument: 'after',
-    setDefaultsOnInsert: true
   });
 
-  await Unit.findOneAndUpdate({
-    property: property._id,
-    unitNumber: vacantUnitNumber
-  }, {
-    organization: organizationId,
-    property: property._id,
+  await Unit.upsert(schema, {
+    propertyId: property.id,
     unitNumber: vacantUnitNumber,
     rentAmount: rentAmount + 3000,
     occupancyStatus: 'vacant',
     tenantAssignment: null,
     isActive: true
-  }, {
-    upsert: true,
-    returnDocument: 'after',
-    setDefaultsOnInsert: true
   });
 
   fs.mkdirSync(path.join(uploadsRoot, 'leases'), { recursive: true });
@@ -204,17 +166,11 @@ const seedStarterUsers = async () => {
     'utf8'
   );
 
-  let lease = await Lease.findOne({
-    tenant: tenantUser._id,
-    property: property._id,
-    unit: occupiedUnitNumber
-  });
-
+  let lease = await Lease.findByTenantAndUnit(schema, tenantUser.id, property.id, occupiedUnitNumber);
   if (!lease) {
-    lease = new Lease({
-      organization: organizationId,
-      tenant: tenantUser._id,
-      property: property._id,
+    lease = await Lease.create(schema, {
+      tenantId: tenantUser.id,
+      propertyId: property.id,
       unit: occupiedUnitNumber,
       filePath: leaseRelativePath,
       fileName: leaseFileName,
@@ -223,24 +179,13 @@ const seedStarterUsers = async () => {
       depositAmount: rentAmount,
       penaltyTerms: 'Late payment attracts a 5% penalty after 5 days.'
     });
-  } else {
-    lease.organization = organizationId;
-    lease.filePath = leaseRelativePath;
-    lease.fileName = leaseFileName;
-    lease.startDate = new Date('2026-01-01');
-    lease.endDate = new Date('2026-12-31');
-    lease.depositAmount = rentAmount;
-    lease.penaltyTerms = 'Late payment attracts a 5% penalty after 5 days.';
   }
 
-  await lease.save();
-
-  let payment = await Payment.findOne({ tenant: tenant._id }).sort({ createdAt: -1 });
-
+  const existingPayments = await Payment.findByTenantId(schema, tenant.id);
+  let payment = existingPayments[0];
   if (!payment) {
-    payment = new Payment({
-      organization: organizationId,
-      tenant: tenant._id,
+    payment = await Payment.create(schema, {
+      tenantId: tenant.id,
       amount: rentAmount,
       currency: 'KSh',
       method: 'mpesa',
@@ -248,26 +193,25 @@ const seedStarterUsers = async () => {
       dueDate: new Date('2026-04-05')
     });
   } else {
-    payment.organization = organizationId;
-    payment.amount = rentAmount;
-    payment.currency = 'KSh';
-    payment.method = 'mpesa';
-    payment.status = 'pending';
-    payment.dueDate = new Date('2026-04-05');
+    await Payment.update(schema, payment.id, {
+      amount: rentAmount,
+      currency: 'KSh',
+      method: 'mpesa',
+      status: 'pending',
+      due_date: new Date('2026-04-05')
+    });
   }
 
-  await payment.save();
-
-  await upsertNotification({
-    organization: organizationId,
-    user: tenantUser._id,
+  await createNotification({
+    schema,
+    userId: tenantUser.id,
     title: 'Welcome to Apex',
     message: `${propertyName} unit ${occupiedUnitNumber} is ready on your dashboard.`
   });
 
-  await upsertNotification({
-    organization: organizationId,
-    user: landlord._id,
+  await createNotification({
+    schema,
+    userId: landlord.id,
     title: 'Starter data ready',
     message: `${tenantName} has been attached to ${propertyName} unit ${occupiedUnitNumber}.`
   });
@@ -298,6 +242,3 @@ seedStarterUsers()
     console.error(error);
     process.exitCode = 1;
   })
-  .finally(async () => {
-    await mongoose.connection.close();
-  });

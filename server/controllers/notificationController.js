@@ -3,17 +3,12 @@ const { logRequestAudit } = require('../helpers/audit');
 const { sendError } = require('../helpers/apiResponse');
 
 const getNotifications = async (req, res) => {
-  const notifications = await Notification.find({ user: req.user.id }).sort({ createdAt: -1 });
+  const notifications = await Notification.findByUser(req.schema, req.user.id);
   res.json(notifications);
 };
 
 const markNotificationRead = async (req, res) => {
-  const notification = await Notification.findOneAndUpdate({
-    _id: req.params.id,
-    user: req.user.id
-  }, {
-    $set: { isRead: true }
-  }, { new: true });
+  const notification = await Notification.markRead(req.schema, req.params.id, req.user.id);
 
   if (!notification) {
     sendError(res, 404, 'Notification not found');
@@ -22,10 +17,10 @@ const markNotificationRead = async (req, res) => {
 
   await logRequestAudit({
     req,
-    organization: notification.organization || null,
+    organization: req.organizationId,
     action: 'Notification marked read',
     entityType: 'notification',
-    entityId: notification._id,
+    entityId: notification.id,
     metadata: {
       summary: notification.title || 'Notice read'
     }

@@ -18,6 +18,11 @@ export const authService = {
 
   async getCurrentUser() {
     const response = await api.get('/auth/me');
-    return response.data.user;
+    return response.data;
+  },
+
+  async switchOrganization(organizationId) {
+    const response = await api.post('/auth/switch-organization', { organizationId });
+    return response.data;
   }
 };

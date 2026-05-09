@@ -1,4 +1,5 @@
 import Swal from 'sweetalert2';
+import { toast } from 'sonner';
 
 const baseConfig = {
   background: '#0f172a',
@@ -15,39 +16,23 @@ const baseConfig = {
   }
 };
 
-export const showToast = ({ icon = 'success', title, text, timer = 2600 }) => Swal.fire({
-  ...baseConfig,
-  icon,
-  title,
-  text,
-  toast: true,
-  position: 'top-end',
-  timer,
-  showConfirmButton: false,
-  timerProgressBar: true
-});
+export const showToast = ({ icon = 'success', title, text, timer = 2600 }) => {
+  if (icon === 'success') {
+    toast.success(title || 'Success', { description: text, duration: timer });
+  } else if (icon === 'error') {
+    toast.error(title || 'Error', { description: text, duration: timer });
+  } else if (icon === 'info') {
+    toast.info(title || 'Info', { description: text, duration: timer });
+  } else {
+    toast(title || 'Notification', { description: text, duration: timer });
+  }
+};
 
-export const showErrorAlert = (title, text) => Swal.fire({
-  ...baseConfig,
-  icon: 'error',
-  title,
-  text
-});
+export const showErrorAlert = (title, text) => toast.error(title || 'Error', { description: text, duration: 4000 });
 
-export const showSuccessAlert = (title, text) => Swal.fire({
-  ...baseConfig,
-  icon: 'success',
-  title,
-  text
-});
+export const showSuccessAlert = (title, text) => toast.success(title || 'Success', { description: text, duration: 4000 });
 
-export const showInfoAlert = (title, text, options = {}) => Swal.fire({
-  ...baseConfig,
-  icon: 'info',
-  title,
-  text,
-  ...options
-});
+export const showInfoAlert = (title, text, options = {}) => toast.info(title || 'Info', { description: text, duration: 4000 });
 
 export const confirmAction = async ({
   cancelButtonText = 'Cancel',

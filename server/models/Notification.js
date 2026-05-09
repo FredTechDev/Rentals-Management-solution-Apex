@@ -1,22 +1,41 @@
-const mongoose = require('mongoose');
+const { tenantQuery } = require('../config/database');
 
-const notificationSchema = new mongoose.Schema({
-  organization: { type: mongoose.Schema.Types.ObjectId, ref: 'Organization' },
-  user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-  title: { type: String, required: true, trim: true },
-  message: { type: String, required: true, trim: true },
-  type: {
-    type: String,
-    enum: ['rent_due', 'payment_confirmation', 'maintenance_update', 'lease_expiry', 'system_notice'],
-    default: 'system_notice'
-  },
-  channel: {
-    type: String,
-    enum: ['sms', 'email', 'in_app'],
-    default: 'in_app'
-  },
-  isRead: { type: Boolean, default: false },
-  metadata: { type: mongoose.Schema.Types.Mixed }
-}, { timestamps: true });
+class Notification {
+  static async findByUser(schema, userId) {
+    const res = await tenantQuery(schema,
+      'SELECT * FROM notifications WHERE user_id = $1 ORDER BY created_at DESC',
+      [userId]
+    );
+    return res.rows;
+  }
 
-module.exports = mongoose.models.Notification || mongoose.model('Notification', notificationSchema);
+  static async create(schema, data) {
+    const res = await tenantQuery(schema,
+      `INSERT INTO notifications
+        (user_id, title, message, type, channel, is_read, metadata)
+       VALUES ($1,$2,$3,$4,$5,$6,$7)
+       RETURNING *`,
+      [
+        data.userId,
+        data.title,
+        data.message,
+        data.type || 'system_notice',
+        data.channel || 'in_app',
+        data.isRead || false,
+        data.metadata || {}
+      ]
+    );
+    return res.rows[0];
+  }
+
+  static async markRead(schema, id, userId) {
+    const res = await tenantQuery(schema,
+      `UPDATE notifications SET is_read = TRUE, updated_at = NOW()
+       WHERE id = $1 AND user_id = $2 RETURNING *`,
+      [id, userId]
+    );
+    return res.rows[0] || null;
+  }
+}
+
+module.exports = Notification;

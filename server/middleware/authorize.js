@@ -1,10 +1,9 @@
-const { sendError } = require('../helpers/apiResponse');
 const { hasRole } = require('../helpers/rbac');
+const { AppError } = require('./errorHandler');
 
 module.exports = (...allowedRoles) => (req, res, next) => {
   if (!hasRole(req.user, allowedRoles)) {
-    sendError(res, 403, 'You do not have permission to access this resource');
-    return;
+    return next(new AppError('You do not have permission to access this resource', 403));
   }
 
   next();

@@ -1,22 +1,32 @@
-const { Organization } = require('../models');
+const { Organization, OrganizationMembership, User } = require('../models');
+const { createTenantSchema } = require('../services/tenantService');
 
 const ensureOrganizationForUser = async (user, fallbackName) => {
-  if (user.organization) {
-    return user.organization;
+  if (user.role === 'super_admin') {
+    return null;
+  }
+
+  if (user.organization_id) {
+    return user.organization_id;
   }
 
   const organization = await Organization.create({
     name: fallbackName || `${user.name}'s Portfolio`,
-    owner: user._id,
+    ownerId: user.id,
     status: user.role === 'super_admin' ? 'active' : 'trial',
     subscriptionPlan: 'basic',
     billingCycle: 'monthly'
   });
 
-  user.organization = organization._id;
-  await user.save();
+  await createTenantSchema(organization.schema_name);
+  await User.update(user.id, { organization_id: organization.id });
+  await OrganizationMembership.create({
+    userId: user.id,
+    organizationId: organization.id,
+    isDefault: true
+  });
 
-  return organization._id;
+  return organization.id;
 };
 
 module.exports = {

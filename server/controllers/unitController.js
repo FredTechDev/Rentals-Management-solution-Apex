@@ -1,30 +1,49 @@
-const { Property, Unit } = require('../models');
+const { Property, Tenant, Unit } = require('../models');
 const { logRequestAudit } = require('../helpers/audit');
 const { sendError } = require('../helpers/apiResponse');
 const { ROLES } = require('../helpers/rbac');
 
 const manageRoles = [ROLES.LANDLORD, ROLES.PROPERTY_MANAGER, ROLES.SUPER_ADMIN];
 
-const buildManagedPropertyQuery = (user) => {
-  if (user.role === ROLES.SUPER_ADMIN) {
-    return {};
-  }
+const canManageProperty = (user, property) => Boolean(property) && (
+  user.role === ROLES.SUPER_ADMIN
+  || property.landlord_id === user.id
+  || property.manager_id === user.id
+);
 
-  return {
-    $or: [
-      { landlord: user.id },
-      { manager: user.id }
-    ]
-  };
-};
+const mapUnit = (unit) => ({
+  ...unit,
+  property: unit.property_id,
+  unitNumber: unit.unit_number,
+  rentAmount: unit.rent_amount,
+  occupancyStatus: unit.occupancy_status,
+  tenantAssignment: unit.tenant_assignment,
+  isActive: unit.is_active,
+  meterReadings: unit.meter_readings || {}
+});
 
 const getUnitsByProperty = async (req, res) => {
-  const units = await Unit.find({
-    property: req.params.propertyId,
-    isActive: { $ne: false }
-  }).sort({ unitNumber: 1 });
+  const property = await Property.findById(req.schema, req.params.propertyId);
+  if (!property) {
+    sendError(res, 404, 'Property not found');
+    return;
+  }
 
-  res.json(units);
+  if (!canManageProperty(req.user, property)) {
+    const tenant = await Tenant.findOne(req.schema, {
+      userId: req.user.id,
+      propertyId: property.id,
+      status: 'active'
+    });
+
+    if (!tenant) {
+      sendError(res, 403, 'You do not have permission to view units for this property');
+      return;
+    }
+  }
+
+  const units = await Unit.findByProperty(req.schema, req.params.propertyId);
+  res.json(units.map(mapUnit));
 };
 
 const createUnit = async (req, res) => {
@@ -33,13 +52,15 @@ const createUnit = async (req, res) => {
     return;
   }
 
-  const property = await Property.findOne({
-    _id: req.body.propertyId,
-    ...buildManagedPropertyQuery(req.user)
-  });
+  const property = await Property.findById(req.schema, req.body.propertyId);
 
   if (!property) {
     sendError(res, 404, 'Property not found');
+    return;
+  }
+
+  if (!canManageProperty(req.user, property)) {
+    sendError(res, 403, 'You do not have permission to update this property');
     return;
   }
 
@@ -49,41 +70,33 @@ const createUnit = async (req, res) => {
     return;
   }
 
-  const unit = await Unit.findOneAndUpdate({
-    property: property._id,
-    unitNumber
-  }, {
-    organization: property.organization,
-    property: property._id,
+  const unit = await Unit.upsert(req.schema, {
+    propertyId: property.id,
     unitNumber,
     rentAmount: Number(req.body.rentAmount || 0),
     occupancyStatus: req.body.occupancyStatus || 'vacant',
     meterReadings: req.body.meterReadings || {},
     isActive: true
-  }, {
-    new: true,
-    upsert: true,
-    setDefaultsOnInsert: true
   });
 
   if (!property.units.includes(unitNumber)) {
-    property.units.push(unitNumber);
-    await property.save();
+    const nextUnits = [...property.units, unitNumber];
+    await Property.update(req.schema, property.id, { units: nextUnits });
   }
 
   await logRequestAudit({
     req,
-    organization: property.organization,
+    organization: req.organizationId,
     action: 'Unit created',
     entityType: 'unit',
-    entityId: unit._id,
+    entityId: unit.id,
     metadata: {
       propertyName: property.name,
-      summary: `${property.name} • Unit ${unit.unitNumber}`
+      summary: `${property.name} • Unit ${unit.unit_number}`
     }
   });
 
-  res.status(201).json(unit);
+  res.status(201).json(mapUnit(unit));
 };
 
 const updateUnit = async (req, res) => {
@@ -92,57 +105,59 @@ const updateUnit = async (req, res) => {
     return;
   }
 
-  const unit = await Unit.findById(req.params.id).populate('property');
+  const unit = await Unit.findById(req.schema, req.params.id);
   if (!unit) {
     sendError(res, 404, 'Unit not found');
     return;
   }
 
-  const managedProperty = await Property.findOne({
-    _id: unit.property._id,
-    ...buildManagedPropertyQuery(req.user)
-  });
-
+  const managedProperty = await Property.findById(req.schema, unit.property_id);
   if (!managedProperty) {
+    sendError(res, 404, 'Property not found');
+    return;
+  }
+
+  if (!canManageProperty(req.user, managedProperty)) {
     sendError(res, 403, 'You do not have permission to update this unit');
     return;
   }
 
-  const previousUnitNumber = unit.unitNumber;
+  const previousUnitNumber = unit.unit_number;
   const nextUnitNumber = req.body.unitNumber ? String(req.body.unitNumber).trim() : previousUnitNumber;
 
-  unit.unitNumber = nextUnitNumber;
-  unit.rentAmount = req.body.rentAmount ?? unit.rentAmount;
-  unit.occupancyStatus = req.body.occupancyStatus || unit.occupancyStatus;
-  unit.meterReadings = req.body.meterReadings || unit.meterReadings;
-  unit.isActive = req.body.isActive ?? unit.isActive;
-  await unit.save();
+  const updatedUnit = await Unit.update(req.schema, unit.id, {
+    unit_number: nextUnitNumber,
+    rent_amount: req.body.rentAmount ?? unit.rent_amount,
+    occupancy_status: req.body.occupancyStatus || unit.occupancy_status,
+    meter_readings: req.body.meterReadings || unit.meter_readings,
+    is_active: req.body.isActive ?? unit.is_active
+  });
 
-  managedProperty.units = [...new Set(
+  const nextUnits = [...new Set(
     managedProperty.units
       .map((propertyUnit) => propertyUnit === previousUnitNumber ? nextUnitNumber : propertyUnit)
       .filter(Boolean)
   )];
 
-  if (!managedProperty.units.includes(nextUnitNumber)) {
-    managedProperty.units.push(nextUnitNumber);
+  if (!nextUnits.includes(nextUnitNumber)) {
+    nextUnits.push(nextUnitNumber);
   }
 
-  await managedProperty.save();
+  await Property.update(req.schema, managedProperty.id, { units: nextUnits });
 
   await logRequestAudit({
     req,
-    organization: managedProperty.organization,
+    organization: req.organizationId,
     action: 'Unit updated',
     entityType: 'unit',
-    entityId: unit._id,
+    entityId: updatedUnit.id,
     metadata: {
       propertyName: managedProperty.name,
-      summary: `${managedProperty.name} • Unit ${unit.unitNumber}`
+      summary: `${managedProperty.name} • Unit ${updatedUnit.unit_number}`
     }
   });
 
-  res.json(unit);
+  res.json(mapUnit(updatedUnit));
 };
 
 module.exports = {

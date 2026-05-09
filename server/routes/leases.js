@@ -8,5 +8,6 @@ router.post('/leases/upload', leaseUpload.single('lease'), asyncHandler(leaseCon
 router.get('/leases/tenant', asyncHandler(leaseController.getTenantLease));
 router.get('/leases/landlord', asyncHandler(leaseController.getLandlordLeases));
 router.get('/leases/view/:id', asyncHandler(leaseController.viewLease));
+router.delete('/leases/:id', asyncHandler(leaseController.deleteLease));
 
 module.exports = router;

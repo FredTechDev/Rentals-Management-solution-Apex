@@ -27,8 +27,12 @@ const Login = () => {
     try {
       const response = await authService.login({ email, password });
       signIn({
-        token: response.token,
-        user: response.user
+        token: response.tokens?.accessToken || response.token,
+        user: response.user,
+        member: response.member,
+        roles: response.roles,
+        organization: response.organization,
+        organizations: response.organizations
       });
       await showToast({
         icon: 'success',

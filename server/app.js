@@ -2,10 +2,10 @@ const express = require('express');
 const fs = require('fs');
 const path = require('path');
 const cors = require('cors');
-const mongoose = require('mongoose');
 const apiRoutes = require('./routes');
 const { uploadsRoot } = require('./config/env');
 const { errorHandler, notFound } = require('./middleware/errorHandler');
+const { query } = require('./config/database');
 
 const app = express();
 
@@ -21,13 +21,13 @@ app.get('/', (req, res) => {
   res.send('Apex Agencies Backend API is running...');
 });
 
-app.get('/health', (req, res) => {
-  const isReady = mongoose.connection.readyState === 1;
-
-  res.status(isReady ? 200 : 503).json({
-    status: isReady ? 'ok' : 'degraded',
-    mongodbState: mongoose.connection.readyState
-  });
+app.get('/health', async (req, res) => {
+  try {
+    await query('SELECT 1');
+    res.status(200).json({ status: 'ok', db: 'ready' });
+  } catch (error) {
+    res.status(503).json({ status: 'degraded', db: 'unreachable' });
+  }
 });
 
 app.use('/api', apiRoutes);

@@ -56,7 +56,7 @@ const logRequestAudit = async ({
   entityId = null,
   metadata = {}
 } = {}) => logAudit({
-  organization: organization || req?.user?.organizationId || null,
+  organization: organization || req?.organizationId || req?.user?.organization_id || null,
   actor: req?.user?.id || null,
   action,
   entityType,

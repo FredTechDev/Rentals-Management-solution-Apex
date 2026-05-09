@@ -1,8 +1,10 @@
-const { Notification, Property, Tenant, Unit, User } = require('../models');
+const { Property, Tenant, Unit, User, OrganizationMembership } = require('../models');
+const crypto = require('crypto');
 const { logRequestAudit } = require('../helpers/audit');
 const { sendError } = require('../helpers/apiResponse');
-const { ensureOrganizationForUser } = require('../helpers/organization');
 const { createNotification } = require('../helpers/notifications');
+const { sendAccountCreatedEmail } = require('../services/emailService');
+const { deleteFromCloudinary } = require('../helpers/upload');
 const { ROLES } = require('../helpers/rbac');
 
 const manageRoles = [ROLES.LANDLORD, ROLES.PROPERTY_MANAGER, ROLES.SUPER_ADMIN];
@@ -12,31 +14,68 @@ const sanitizeUnits = (units = []) => {
   return [...new Set(input.map((unit) => String(unit).trim()).filter(Boolean))];
 };
 
-const buildManagedPropertyQuery = (user) => {
+const buildManagedPropertyFilter = (user) => {
   if (user.role === ROLES.SUPER_ADMIN) {
     return {};
   }
 
-  return {
-    $or: [
-      { landlord: user.id },
-      { manager: user.id }
-    ]
-  };
+  if (user.role === ROLES.LANDLORD) {
+    return { landlordId: user.id };
+  }
+
+  // Property Managers only see properties assigned to them via manager_id
+  return { managerId: user.id };
 };
 
-const syncPropertyUnits = async (property, incomingUnits) => {
+const canManageProperty = (user, property) => {
+  if (!property) return false;
+  
+  if (user.role === ROLES.SUPER_ADMIN) return true;
+  
+  if (user.role === ROLES.LANDLORD) {
+    // Landlord owns the property OR it belongs to their organization context
+    return property.landlord_id === user.id;
+  }
+
+  if (user.role === ROLES.PROPERTY_MANAGER) {
+    // Property Manager MUST be specifically assigned to this property
+    return property.manager_id === user.id;
+  }
+
+  return false;
+};
+
+const mapProperty = (property) => ({
+  ...property,
+  landlord: property.landlord_id,
+  manager: property.manager_id,
+  units: property.units || [],
+  images: property.images || []
+});
+
+const mapTenant = (tenant, user) => ({
+  ...tenant,
+  user: user ? {
+    id: user.id,
+    name: user.name,
+    email: user.email,
+    phoneNumber: user.phone_number,
+    role: user.role
+  } : null,
+  property: tenant.property_id
+});
+
+const syncPropertyUnits = async (schema, property, incomingUnits) => {
   const normalizedUnits = sanitizeUnits(incomingUnits ?? property.units);
-  property.units = normalizedUnits;
-  await property.save();
+  await Property.update(schema, property.id, { units: normalizedUnits });
 
   const [existingUnits, activeTenants] = await Promise.all([
-    Unit.find({ property: property._id }),
-    Tenant.find({ property: property._id, status: 'active' })
+    Unit.findByProperty(schema, property.id, { includeInactive: true }),
+    Tenant.find(schema, { propertyId: property.id, status: 'active' })
   ]);
 
-  const occupiedByUnit = new Map(activeTenants.map((tenant) => [tenant.unit, tenant._id]));
-  const unitMap = new Map(existingUnits.map((unit) => [unit.unitNumber, unit]));
+  const occupiedByUnit = new Map(activeTenants.map((tenant) => [tenant.unit, tenant.id]));
+  const unitMap = new Map(existingUnits.map((unit) => [unit.unit_number, unit]));
 
   for (const unitNumber of normalizedUnits) {
     const tenantAssignment = occupiedByUnit.get(unitNumber) || null;
@@ -44,9 +83,8 @@ const syncPropertyUnits = async (property, incomingUnits) => {
     const existingUnit = unitMap.get(unitNumber);
 
     if (!existingUnit) {
-      await Unit.create({
-        organization: property.organization,
-        property: property._id,
+      await Unit.upsert(schema, {
+        propertyId: property.id,
         unitNumber,
         occupancyStatus,
         tenantAssignment
@@ -54,28 +92,23 @@ const syncPropertyUnits = async (property, incomingUnits) => {
       continue;
     }
 
-    existingUnit.organization = property.organization;
-    existingUnit.isActive = true;
-    existingUnit.tenantAssignment = tenantAssignment;
-    existingUnit.occupancyStatus = occupancyStatus;
-    await existingUnit.save();
+    await Unit.upsert(schema, {
+      propertyId: property.id,
+      unitNumber,
+      rentAmount: existingUnit.rent_amount,
+      occupancyStatus,
+      tenantAssignment,
+      meterReadings: existingUnit.meter_readings,
+      isActive: true
+    });
   }
 
-  await Unit.updateMany({
-    property: property._id,
-    unitNumber: { $nin: normalizedUnits }
-  }, {
-    $set: {
-      isActive: false,
-      occupancyStatus: 'vacant',
-      tenantAssignment: null
-    }
-  });
+  await Unit.deactivateMissing(schema, property.id, normalizedUnits);
 };
 
 const getProperties = async (req, res) => {
-  const properties = await Property.find(buildManagedPropertyQuery(req.user));
-  res.json(properties);
+  const properties = await Property.find(req.schema, buildManagedPropertyFilter(req.user));
+  res.json(properties.map(mapProperty));
 };
 
 const createProperty = async (req, res) => {
@@ -84,77 +117,150 @@ const createProperty = async (req, res) => {
     return;
   }
 
-  const currentUser = await User.findById(req.user.id);
-  const organizationId = await ensureOrganizationForUser(currentUser);
-
-  const property = new Property({
+  const property = await Property.create(req.schema, {
     ...req.body,
-    organization: organizationId,
-    landlord: req.user.role === ROLES.SUPER_ADMIN && req.body.landlord ? req.body.landlord : req.user.id,
-    manager: req.body.manager || (req.user.role === ROLES.PROPERTY_MANAGER ? req.user.id : undefined),
+    landlordId: req.user.role === ROLES.SUPER_ADMIN && req.body.landlord ? req.body.landlord : req.user.id,
+    managerId: req.body.manager || (req.user.role === ROLES.PROPERTY_MANAGER ? req.user.id : null),
     units: sanitizeUnits(req.body.units)
   });
 
-  await property.save();
-  await syncPropertyUnits(property, property.units);
+  await syncPropertyUnits(req.schema, property, property.units);
 
   await logRequestAudit({
     req,
-    organization: property.organization,
+    organization: req.organizationId,
     action: 'Property created',
     entityType: 'property',
-    entityId: property._id,
+    entityId: property.id,
     metadata: {
       propertyName: property.name,
       summary: `${property.name} • ${property.units.length} units`
     }
   });
 
-  res.status(201).json(property);
+  res.status(201).json(mapProperty(property));
 };
 
 const updateProperty = async (req, res) => {
   const propertyId = req.params.id;
 
-  const property = await Property.findOneAndUpdate(
-    { _id: propertyId, ...buildManagedPropertyQuery(req.user) },
-    { ...req.body, units: req.body.units ? sanitizeUnits(req.body.units) : undefined },
-    { new: true, runValidators: true }
-  );
-
+  const property = await Property.findById(req.schema, propertyId);
   if (!property) {
-    const exists = await Property.findById(propertyId);
-    if (!exists) {
-      sendError(res, 404, 'Property not found in database');
-      return;
-    }
+    sendError(res, 404, 'Property not found in database');
+    return;
+  }
 
+  if (!canManageProperty(req.user, property)) {
     sendError(res, 403, 'You do not have permission to edit this property');
     return;
   }
 
-  if (req.body.units) {
-    await syncPropertyUnits(property, req.body.units);
+  const updates = {};
+  if (req.body.name !== undefined) updates.name = req.body.name;
+  if (req.body.address !== undefined) updates.address = req.body.address;
+  if (req.body.description !== undefined) updates.description = req.body.description || null;
+  if (req.body.type !== undefined) updates.type = req.body.type || 'apartment';
+  if (req.body.units !== undefined) updates.units = sanitizeUnits(req.body.units);
+  if (req.user.role === ROLES.SUPER_ADMIN && req.body.landlord !== undefined) {
+    updates.landlord_id = req.body.landlord || property.landlord_id;
+  }
+  if (
+    req.body.manager !== undefined
+    && (req.user.role === ROLES.SUPER_ADMIN || property.landlord_id === req.user.id)
+  ) {
+    updates.manager_id = req.body.manager || null;
+  }
+
+  const updated = await Property.update(req.schema, propertyId, updates);
+
+  if (req.body.units !== undefined) {
+    await syncPropertyUnits(req.schema, updated, req.body.units);
   }
 
   await logRequestAudit({
     req,
-    organization: property.organization,
+    organization: req.organizationId,
     action: 'Property updated',
     entityType: 'property',
-    entityId: property._id,
+    entityId: updated.id,
     metadata: {
-      propertyName: property.name,
-      summary: `${property.name} updated`
+      propertyName: updated.name,
+      summary: `${updated.name} updated`
     }
   });
 
-  res.json(property);
+  res.json(mapProperty(updated));
+};
+
+const deleteProperty = async (req, res) => {
+  const propertyId = req.params.id;
+  const property = await Property.findById(req.schema, propertyId);
+
+  if (!property) {
+    sendError(res, 404, 'Property not found');
+    return;
+  }
+
+  if (!canManageProperty(req.user, property)) {
+    sendError(res, 403, 'You do not have permission to delete this property');
+    return;
+  }
+
+  // Delete all property images from Cloudinary
+  if (property.images && Array.isArray(property.images)) {
+    for (const imageUrl of property.images) {
+      await deleteFromCloudinary(imageUrl);
+    }
+  }
+
+  // Find all leases and repair requests for this property to delete their files too
+  const { Lease, RepairRequest } = require('../models');
+  const [leases, repairs] = await Promise.all([
+    Lease.findByPropertyIds(req.schema, [propertyId]),
+    RepairRequest.findByPropertyIds(req.schema, [propertyId])
+  ]);
+
+  for (const lease of leases) {
+    if (lease.file_path) await deleteFromCloudinary(lease.file_path);
+  }
+  for (const repair of repairs) {
+    if (repair.image_path) await deleteFromCloudinary(repair.image_path);
+  }
+
+  await Property.delete(req.schema, propertyId);
+
+  await logRequestAudit({
+    req,
+    organization: req.organizationId,
+    action: 'Property deleted',
+    entityType: 'property',
+    entityId: propertyId,
+    metadata: {
+      propertyName: property.name
+    }
+  });
+
+  res.json({ message: 'Property and all associated files deleted successfully' });
 };
 
 const getPropertyTenants = async (req, res) => {
-  const tenants = await Tenant.find({ property: req.params.id }).populate('user', 'name email phoneNumber role');
-  res.json(tenants);
+  const property = await Property.findById(req.schema, req.params.id);
+  if (!property) {
+    sendError(res, 404, 'Property not found');
+    return;
+  }
+
+  if (!canManageProperty(req.user, property)) {
+    sendError(res, 403, 'You do not have permission to view tenants for this property');
+    return;
+  }
+
+  const tenants = await Tenant.find(req.schema, { propertyId: req.params.id });
+  const userIds = tenants.map((tenant) => tenant.user_id);
+  const users = await User.findByIds(userIds);
+  const userMap = new Map(users.map((user) => [user.id, user]));
+
+  res.json(tenants.map((tenant) => mapTenant(tenant, userMap.get(tenant.user_id))));
 };
 
 const createTenant = async (req, res) => {
@@ -163,53 +269,82 @@ const createTenant = async (req, res) => {
     return;
   }
 
-  const property = await Property.findOne({
-    _id: req.body.property,
-    ...buildManagedPropertyQuery(req.user)
-  });
+  const property = await Property.findById(req.schema, req.body.property);
 
   if (!property) {
     sendError(res, 404, 'Property not found');
     return;
   }
 
-  const tenant = new Tenant({
-    ...req.body,
-    organization: property.organization
+  if (!canManageProperty(req.user, property)) {
+    sendError(res, 403, 'You do not have permission to add tenants to this property');
+    return;
+  }
+
+  const tenantUser = await User.findById(req.body.user);
+  if (!tenantUser) {
+    sendError(res, 404, 'User not found');
+    return;
+  }
+
+  if (tenantUser.role !== ROLES.TENANT) {
+    sendError(res, 400, 'Only tenant accounts can be assigned to rental units');
+    return;
+  }
+
+  const existingTenant = await Tenant.findOne(req.schema, {
+    propertyId: req.body.property,
+    unit: req.body.unit,
+    status: 'active'
   });
 
-  await tenant.save();
+  if (existingTenant) {
+    sendError(res, 400, 'Unit is already occupied');
+    return;
+  }
 
-  if (tenant.user) {
-    await User.findByIdAndUpdate(tenant.user, {
+  const tenant = await Tenant.create(req.schema, {
+    userId: req.body.user,
+    propertyId: req.body.property,
+    unit: req.body.unit,
+    rentAmount: req.body.rentAmount,
+    dueDate: req.body.dueDate,
+    status: req.body.status || 'active',
+    leaseStart: req.body.leaseStart,
+    leaseEnd: req.body.leaseEnd
+  });
+
+  if (tenant.user_id) {
+    await User.update(tenant.user_id, {
       status: 'active',
-      organization: property.organization
+      organization_id: req.organizationId
+    });
+    await OrganizationMembership.create({
+      userId: tenant.user_id,
+      organizationId: req.organizationId,
+      isDefault: false
     });
   }
 
-  await Unit.findOneAndUpdate({
-    property: property._id,
-    unitNumber: tenant.unit
-  }, {
-    $set: {
-      organization: property.organization,
-      occupancyStatus: 'occupied',
-      tenantAssignment: tenant._id,
-      isActive: true
-    }
-  }, { upsert: true, new: true, setDefaultsOnInsert: true });
+  await Unit.upsert(req.schema, {
+    propertyId: property.id,
+    unitNumber: tenant.unit,
+    occupancyStatus: 'occupied',
+    tenantAssignment: tenant.id,
+    isActive: true
+  });
 
   if (!property.units.includes(tenant.unit)) {
-    property.units.push(tenant.unit);
-    await property.save();
+    const nextUnits = [...property.units, tenant.unit];
+    await Property.update(req.schema, property.id, { units: nextUnits });
   }
 
   await logRequestAudit({
     req,
-    organization: property.organization,
+    organization: req.organizationId,
     action: 'Tenant created',
     entityType: 'tenant',
-    entityId: tenant._id,
+    entityId: tenant.id,
     metadata: {
       propertyName: property.name,
       summary: `Unit ${tenant.unit} assigned`
@@ -220,20 +355,27 @@ const createTenant = async (req, res) => {
 };
 
 const getPendingRegistrations = async (req, res) => {
-  const properties = await Property.find(buildManagedPropertyQuery(req.user));
-  const propertyIds = properties.map((property) => property._id);
+  const properties = await Property.find(req.schema, buildManagedPropertyFilter(req.user));
+  const propertyIds = properties.map((property) => property.id);
 
-  const pendingUsers = await User.find({
-    status: 'pending',
-    interestedProperty: { $in: propertyIds }
-  }).populate('interestedProperty', 'name address');
+  const pendingUsers = await User.findPendingByPropertyIds(propertyIds, req.schema);
+  const propertyMap = new Map(properties.map((property) => [property.id, property]));
 
-  res.json(pendingUsers);
+  res.json(pendingUsers.map((user) => ({
+    ...User.sanitize(user),
+    interestedProperty: propertyMap.get(user.interested_property_id)
+      ? {
+        id: propertyMap.get(user.interested_property_id).id,
+        name: propertyMap.get(user.interested_property_id).name,
+        address: propertyMap.get(user.interested_property_id).address
+      }
+      : null
+  })));
 };
 
 const approveRegistration = async (req, res) => {
   const { userId } = req.params;
-  const rentAmount = Number(req.body.rentAmount || 0);
+  const { rentAmount, depositAmount, dueDate, leaseStart, leaseEnd } = req.body;
 
   const user = await User.findById(userId);
   if (!user) {
@@ -241,19 +383,26 @@ const approveRegistration = async (req, res) => {
     return;
   }
 
-  const property = await Property.findOne({
-    _id: user.interestedProperty,
-    ...buildManagedPropertyQuery(req.user)
-  });
+  if (user.role !== ROLES.TENANT) {
+    sendError(res, 400, 'Only tenant registrations can be approved here');
+    return;
+  }
 
-  if (!property) {
+  const property = await Property.findById(req.schema, user.interested_property_id);
+
+  if (!property || user.interested_property_schema !== req.schema) {
     sendError(res, 403, 'Unauthorized to approve for this property');
     return;
   }
 
-  const existingTenant = await Tenant.findOne({
-    property: property._id,
-    unit: user.interestedUnit,
+  if (!canManageProperty(req.user, property)) {
+    sendError(res, 403, 'Unauthorized to approve for this property');
+    return;
+  }
+
+  const existingTenant = await Tenant.findOne(req.schema, {
+    propertyId: property.id,
+    unit: user.interested_unit,
     status: 'active'
   });
 
@@ -262,56 +411,80 @@ const approveRegistration = async (req, res) => {
     return;
   }
 
-  const tenant = new Tenant({
-    organization: property.organization,
-    user: user._id,
-    property: property._id,
-    unit: user.interestedUnit,
+  const tenant = await Tenant.create(req.schema, {
+    userId: user.id,
+    propertyId: property.id,
+    unit: user.interested_unit,
     rentAmount,
+    dueDate: dueDate || 1,
+    leaseStart: leaseStart || null,
+    leaseEnd: leaseEnd || null,
     status: 'active'
   });
 
-  await tenant.save();
+  // Create a lease record to track the deposit and terms
+  const { Lease } = require('../models');
+  await Lease.create(req.schema, {
+    tenantId: user.id,
+    propertyId: property.id,
+    unit: user.interested_unit,
+    depositAmount: depositAmount || 0,
+    startDate: leaseStart || null,
+    endDate: leaseEnd || null,
+    fileName: 'System Generated Entry',
+    filePath: 'N/A'
+  });
 
-  user.status = 'active';
-  user.organization = property.organization;
-  await user.save();
+  // Generate a new temporary password for the tenant
+  const tempPassword = crypto.randomBytes(4).toString('hex'); // 8 character hex
 
-  await Unit.findOneAndUpdate({
-    property: property._id,
-    unitNumber: user.interestedUnit
-  }, {
-    $set: {
-      organization: property.organization,
-      tenantAssignment: tenant._id,
-      occupancyStatus: 'occupied',
-      rentAmount,
-      isActive: true
-    }
-  }, { upsert: true, new: true, setDefaultsOnInsert: true });
+  await User.update(user.id, {
+    status: 'active',
+    organization_id: req.organizationId,
+    password: tempPassword,
+    requires_password_change: true
+  });
 
-  if (!property.units.includes(user.interestedUnit)) {
-    property.units.push(user.interestedUnit);
-    await property.save();
+  await OrganizationMembership.create({
+    userId: user.id,
+    organizationId: req.organizationId,
+    isDefault: true
+  });
+
+  // Send the welcome email with the new credentials and financial summary
+  await sendAccountCreatedEmail(user.email, user.name, tempPassword, ROLES.TENANT);
+
+  await Unit.upsert(req.schema, {
+    propertyId: property.id,
+    unitNumber: user.interested_unit,
+    tenantAssignment: tenant.id,
+    occupancyStatus: 'occupied',
+    rentAmount,
+    isActive: true
+  });
+
+  if (!property.units.includes(user.interested_unit)) {
+    const nextUnits = [...property.units, user.interested_unit];
+    await Property.update(req.schema, property.id, { units: nextUnits });
   }
 
   await createNotification({
-    organization: property.organization,
-    user: user._id,
+    schema: req.schema,
+    userId: user.id,
     title: 'Application approved',
-    message: `Your application for ${property.name} unit ${user.interestedUnit} has been approved.`,
+    message: `Your application for ${property.name} unit ${user.interested_unit} has been approved.`,
     type: 'system_notice'
   });
 
   await logRequestAudit({
     req,
-    organization: property.organization,
+    organization: req.organizationId,
     action: 'Registration approved',
     entityType: 'tenant',
-    entityId: tenant._id,
+    entityId: tenant.id,
     metadata: {
       propertyName: property.name,
-      summary: `${user.name} • Unit ${user.interestedUnit}`,
+      summary: `${user.name} • Unit ${user.interested_unit}`,
       rentAmount
     }
   });
@@ -328,36 +501,42 @@ const rejectRegistration = async (req, res) => {
     return;
   }
 
-  const property = await Property.findOne({
-    _id: user.interestedProperty,
-    ...buildManagedPropertyQuery(req.user)
-  });
+  if (user.role !== ROLES.TENANT) {
+    sendError(res, 400, 'Only tenant registrations can be rejected here');
+    return;
+  }
 
-  if (!property) {
+  const property = await Property.findById(req.schema, user.interested_property_id);
+
+  if (!property || user.interested_property_schema !== req.schema) {
     sendError(res, 403, 'Unauthorized to reject for this property');
     return;
   }
 
-  user.status = 'rejected';
-  await user.save();
+  if (!canManageProperty(req.user, property)) {
+    sendError(res, 403, 'Unauthorized to reject for this property');
+    return;
+  }
+
+  await User.update(user.id, { status: 'rejected' });
 
   await createNotification({
-    organization: property.organization,
-    user: user._id,
+    schema: req.schema,
+    userId: user.id,
     title: 'Application rejected',
-    message: `Your application for ${property.name} unit ${user.interestedUnit} was not approved.`,
+    message: `Your application for ${property.name} unit ${user.interested_unit} was not approved.`,
     type: 'system_notice'
   });
 
   await logRequestAudit({
     req,
-    organization: property.organization,
+    organization: req.organizationId,
     action: 'Registration rejected',
     entityType: 'user',
-    entityId: user._id,
+    entityId: user.id,
     metadata: {
       propertyName: property.name,
-      summary: `${user.name} • Unit ${user.interestedUnit}`
+      summary: `${user.name} • Unit ${user.interested_unit}`
     }
   });
 
@@ -368,6 +547,7 @@ module.exports = {
   getProperties,
   createProperty,
   updateProperty,
+  deleteProperty,
   getPropertyTenants,
   createTenant,
   getPendingRegistrations,
