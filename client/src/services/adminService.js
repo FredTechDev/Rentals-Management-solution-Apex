@@ -16,5 +16,20 @@ export const adminService = {
       params: { limit }
     });
     return response.data;
+  },
+
+  async getPendingUsers() {
+    const response = await api.get('/admin/users/pending');
+    return response.data;
+  },
+
+  async approveUser(userId) {
+    const response = await api.post(`/admin/users/${userId}/approve`);
+    return response.data;
+  },
+
+  async updateOrganizationBilling(organizationId, payload) {
+    const response = await api.put(`/admin/organizations/${organizationId}/billing`, payload);
+    return response.data;
   }
 };

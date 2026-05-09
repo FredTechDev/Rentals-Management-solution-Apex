@@ -74,6 +74,14 @@
   animation: slideUp 0.6s ease-out;
 }
 
+.auth-card-login {
+  max-width: 460px;
+}
+
+.auth-card-register {
+  max-width: 620px;
+}
+
 .auth-card-wide {
   max-width: none;
 }

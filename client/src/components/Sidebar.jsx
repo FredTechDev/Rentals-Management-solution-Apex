@@ -5,16 +5,12 @@ import {
   MessageCircle, 
   LogOut, 
   X,
-  Building,
   User,
-  ShieldCheck,
-  CreditCard,
   Settings,
   Shield
 } from 'lucide-react';
 import { useSession } from '../hooks/useSession';
 import { formatRoleLabel } from '../utils/roles';
-import { canAccessPath } from '../utils/access';
 
 const Sidebar = ({ isOpen, onClose }) => {
   const navigate = useNavigate();
@@ -30,12 +26,8 @@ const Sidebar = ({ isOpen, onClose }) => {
   const allNavItems = [
     { label: 'Dashboard', path: '/', icon: LayoutDashboard },
     { label: 'Community', path: '/community', icon: MessageCircle },
-    { label: 'Properties', path: '/properties', icon: Building },
-    { label: 'Payments', path: '/payments', icon: CreditCard },
     { label: 'Settings', path: '/settings', icon: Settings },
   ];
-
-  const navItems = allNavItems.filter(item => canAccessPath(session, item.path));
 
   if (!user) return null;
 
@@ -62,7 +54,7 @@ const Sidebar = ({ isOpen, onClose }) => {
         </div>
 
         <nav className="sidebar-navigation">
-          {navItems.map((item) => (
+          {allNavItems.map((item) => (
             <NavLink 
               key={item.path} 
               to={item.path} 

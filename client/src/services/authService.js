@@ -21,8 +21,18 @@ export const authService = {
     return response.data;
   },
 
-  async switchOrganization(organizationId) {
-    const response = await api.post('/auth/switch-organization', { organizationId });
+  async changePassword(payload) {
+    const response = await api.post('/auth/change-password', payload);
+    return response.data;
+  },
+
+  async getStaff() {
+    const response = await api.get('/auth/staff');
+    return response.data;
+  },
+
+  async addStaff(payload) {
+    const response = await api.post('/auth/staff', payload);
     return response.data;
   }
 };

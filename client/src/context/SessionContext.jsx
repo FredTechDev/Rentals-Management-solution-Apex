@@ -10,7 +10,6 @@ export const SessionProvider = ({ children }) => {
     const storedSession = readSession();
     return Boolean(storedSession?.token && !storedSession?.user);
   });
-  const [switchingOrganization, setSwitchingOrganization] = useState(false);
 
   const signIn = (nextSession) => {
     writeSession(nextSession);
@@ -22,21 +21,6 @@ export const SessionProvider = ({ children }) => {
     clearSession();
     setSession(null);
     setLoading(false);
-  };
-
-  const setUser = (nextUser) => {
-    const currentSession = readSession();
-    if (!currentSession?.token) {
-      return;
-    }
-
-    const nextSession = {
-      ...currentSession,
-      user: nextUser
-    };
-
-    writeSession(nextSession);
-    setSession(nextSession);
   };
 
   const refreshSession = async () => {
@@ -54,9 +38,9 @@ export const SessionProvider = ({ children }) => {
         token: currentSession.token,
         user: authData.user,
         member: authData.member || null,
-        roles: authData.roles || [],
         organization: authData.organization || null,
-        organizations: authData.organizations || []
+        organizations: authData.organizations || [],
+        requiresPasswordChange: authData.user?.requiresPasswordChange || authData.user?.requires_password_change || false
       };
 
       writeSession(nextSession);
@@ -67,32 +51,6 @@ export const SessionProvider = ({ children }) => {
       return null;
     } finally {
       setLoading(false);
-    }
-  };
-
-  const switchOrganization = async (organizationId) => {
-    if (!session?.token || !organizationId || organizationId === session.organization?._id || organizationId === session.organization?.id) {
-      return;
-    }
-
-    setSwitchingOrganization(true);
-    try {
-      const data = await authService.switchOrganization(organizationId);
-      const nextSession = {
-        token: data.tokens?.accessToken || data.token || session.token,
-        user: data.user,
-        member: data.member || null,
-        roles: data.roles || [],
-        organization: data.organization || null,
-        organizations: data.organizations || []
-      };
-      
-      writeSession(nextSession);
-      setSession(nextSession);
-    } catch (error) {
-      console.error('Failed to switch organization', error);
-    } finally {
-      setSwitchingOrganization(false);
     }
   };
 
@@ -120,18 +78,15 @@ export const SessionProvider = ({ children }) => {
       value={{
         user: session?.user || null,
         member: session?.member || null,
-        roles: session?.roles || [],
         organization: session?.organization || null,
         organizations: session?.organizations || [],
         token: session?.token || null,
+        requiresPasswordChange: session?.requiresPasswordChange || session?.user?.requiresPasswordChange || session?.user?.requires_password_change || false,
         isAuthenticated: Boolean(session?.token),
         loading,
-        switchingOrganization,
         signIn,
         signOut,
-        setUser,
-        refreshSession,
-        switchOrganization
+        refreshSession
       }}
     >
       {children}

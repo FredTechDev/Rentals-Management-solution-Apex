@@ -34,5 +34,15 @@ export const propertyService = {
   async getPropertyTenants(propertyId) {
     const response = await api.get(`/properties/${propertyId}/tenants`);
     return response.data;
+  },
+
+  async deleteProperty(propertyId) {
+    const response = await api.delete(`/properties/${propertyId}`);
+    return response.data;
+  },
+
+  async createTenant(payload) {
+    const response = await api.post('/tenants', payload);
+    return response.data;
   }
 };

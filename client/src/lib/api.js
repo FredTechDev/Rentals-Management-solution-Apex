@@ -1,5 +1,6 @@
 import axios from 'axios';
 import { clearSession, readSession } from './session';
+import { normalizeApiData } from './normalize';
 
 const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || '/api';
 
@@ -30,6 +31,11 @@ api.interceptors.response.use(
     return Promise.reject(error);
   }
 );
+
+api.interceptors.response.use((response) => ({
+  ...response,
+  data: normalizeApiData(response.data)
+}));
 
 export const getApiErrorMessage = (error, fallback = 'Something went wrong.') => (
   error.response?.data?.message

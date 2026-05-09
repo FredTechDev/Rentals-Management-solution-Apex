@@ -60,8 +60,8 @@ const features = [
 ];
 
 const workflow = [
-  'Landlord or manager signs up and adds properties.',
-  'Tenants apply for open units and get reviewed cleanly.',
+  'Admin approves landlord accounts before portfolio access is granted.',
+  'Landlords add managers and review tenant applications for open units.',
   'Rent, maintenance, lease documents, and notices stay in one responsive workspace.'
 ];
 
@@ -95,9 +95,9 @@ const Landing = () => {
             <strong>{rotatingTaglines[activeTagline]}</strong>
           </div>
           <div className="hero-buttons">
-            <FloatingHint content="Start as a tenant, landlord, or property manager with the updated onboarding flow.">
+            <FloatingHint content="Apply as a tenant. Landlords are approved by admin, and managers are added by landlords.">
               <Link to="/register" className="btn-primary">
-                Create Account <ArrowRight size={18} />
+                Apply for a Unit <ArrowRight size={18} />
               </Link>
             </FloatingHint>
             <FloatingHint content="Return to your live dashboard, notifications, charts, and management tools.">
@@ -105,7 +105,7 @@ const Landing = () => {
             </FloatingHint>
           </div>
           <div className="hero-copy-footer">
-            <span>Built for landlords, tenants, caretakers, and SaaS operators.</span>
+            <span>Built for landlords, tenants, managers, and SaaS operators.</span>
             <span>Responsive on desktop, tablet, and mobile.</span>
           </div>
         </div>

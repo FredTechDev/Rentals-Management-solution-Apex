@@ -26,7 +26,6 @@ import AnimatedSection from '../components/AnimatedSection';
 import FloatingHint from '../components/FloatingHint';
 import {
   ManagementCharts,
-  StaffCharts,
   SuperAdminCharts,
   TenantCharts
 } from '../components/charts/DashboardCharts';
@@ -51,7 +50,7 @@ import { suggestionService } from '../services/suggestionService';
 import { unitService } from '../services/unitService';
 import { formatCurrency, formatDate } from '../utils/format';
 import { downloadBlob, openBlobInNewTab } from '../utils/files';
-import { formatRoleLabel, isManagementRole, isStaffRole, ROLES } from '../utils/roles';
+import { formatRoleLabel, isManagementRole, ROLES } from '../utils/roles';
 import '../styles/Dashboard.css';
 
 const emptyRepairDraft = {
@@ -149,6 +148,7 @@ const RepairSection = ({
   newRepair,
   onSubmit,
   onUpdate,
+  onDelete,
   properties,
   requests,
   setNewRepair,
@@ -257,34 +257,49 @@ const RepairSection = ({
               </div>
             )}
           </div>
-          {canManage && request.status !== 'resolved' && (
+          {(canManage || onDelete) && (
             <div className="repair-footer">
-              <FloatingHint content="Capture the next action and technician details in a SweetAlert update sheet.">
-                <button
-                  type="button"
-                  className="btn-secondary"
-                  onClick={async () => {
-                    const update = await promptRepairUpdate({
-                      currentTechnician: request.technicianDetails || ''
-                    });
+              {canManage && request.status !== 'resolved' && (
+                <>
+                  <FloatingHint content="Capture the next action and technician details in a SweetAlert update sheet.">
+                    <button
+                      type="button"
+                      className="btn-secondary"
+                      onClick={async () => {
+                        const update = await promptRepairUpdate({
+                          currentTechnician: request.technicianDetails || ''
+                        });
 
-                    if (update) {
-                      onUpdate(request._id, 'in-progress', update.response, update.technician);
-                    }
-                  }}
-                >
-                  Mark In Progress
-                </button>
-              </FloatingHint>
-              <FloatingHint content="Close this ticket and notify the tenant that the issue is complete.">
-                <button
-                  type="button"
-                  className="btn-primary"
-                  onClick={() => onUpdate(request._id, 'resolved', 'Issue resolved and closed.', request.technicianDetails || '')}
-                >
-                  Resolve
-                </button>
-              </FloatingHint>
+                        if (update) {
+                          onUpdate(request._id, 'in-progress', update.response, update.technician);
+                        }
+                      }}
+                    >
+                      Mark In Progress
+                    </button>
+                  </FloatingHint>
+                  <FloatingHint content="Close this ticket and notify the tenant that the issue is complete.">
+                    <button
+                      type="button"
+                      className="btn-primary"
+                      onClick={() => onUpdate(request._id, 'resolved', 'Issue resolved and closed.', request.technicianDetails || '')}
+                    >
+                      Resolve
+                    </button>
+                  </FloatingHint>
+                </>
+              )}
+              {onDelete && (
+                <FloatingHint content="Permanently remove this maintenance ticket.">
+                  <button
+                    type="button"
+                    className="btn-secondary text-red-500"
+                    onClick={() => onDelete(request._id)}
+                  >
+                    Delete
+                  </button>
+                </FloatingHint>
+              )}
             </div>
           )}
         </div>
@@ -486,7 +501,6 @@ const Dashboard = () => {
   const userRole = user?.role;
   const isTenant = userRole === ROLES.TENANT;
   const isManagement = isManagementRole(userRole);
-  const isStaff = isStaffRole(userRole);
   const isSuperAdmin = userRole === ROLES.SUPER_ADMIN;
   const tenantLease = leases[0] || null;
   const tenantProperties = tenantLease?.property ? [tenantLease.property] : user?.interestedProperty ? [user.interestedProperty] : [];
@@ -614,22 +628,6 @@ const Dashboard = () => {
         setAdminSummary(nextAdminSummary);
         setOrganizations(nextOrganizations);
         setAuditLogs(nextAuditLogs);
-      } else if (isStaff) {
-        const [nextNotifications, nextRepairs] = await Promise.all([
-          notificationService.getNotifications(),
-          repairService.getRepairs()
-        ]);
-
-        setNotifications(nextNotifications);
-        setRepairRequests(nextRepairs);
-        setProperties([]);
-        setPayments([]);
-        setLeases([]);
-        setPendingRegistrations([]);
-        setSuggestions([]);
-        setAdminSummary(null);
-        setOrganizations([]);
-        setAuditLogs([]);
       }
     } catch (requestError) {
       setError(getApiErrorMessage(requestError, 'Failed to load dashboard data.'));
@@ -848,6 +846,30 @@ const Dashboard = () => {
     }
   };
 
+  const handleDeleteLease = async (leaseId) => {
+    const confirmed = await confirmAction({
+      title: 'Delete Lease?',
+      text: 'Are you sure you want to remove this lease agreement? The tenant will no longer have access to it.',
+      confirmButtonText: 'Delete',
+      cancelButtonText: 'Cancel',
+      icon: 'warning'
+    });
+
+    if (!confirmed) return;
+
+    try {
+      await leaseService.deleteLease(leaseId);
+      await showToast({
+        icon: 'success',
+        title: 'Lease Deleted',
+        text: 'The lease agreement has been removed.'
+      });
+      loadDashboard();
+    } catch (requestError) {
+      await showErrorAlert('Delete Failed', getApiErrorMessage(requestError, 'Failed to delete the lease.'));
+    }
+  };
+
   const handlePropertySubmit = async (event) => {
     event.preventDefault();
 
@@ -882,10 +904,34 @@ const Dashboard = () => {
     }
   };
 
+  const handleDeleteProperty = async (propertyId, propertyName) => {
+    const confirmed = await confirmAction({
+      title: 'Delete Property?',
+      text: `Are you sure you want to delete "${propertyName}"? This will remove all associated units and data.`,
+      confirmButtonText: 'Delete',
+      cancelButtonText: 'Cancel',
+      icon: 'warning'
+    });
+
+    if (!confirmed) return;
+
+    try {
+      await propertyService.deleteProperty(propertyId);
+      await showToast({
+        icon: 'success',
+        title: 'Property Deleted',
+        text: `${propertyName} has been removed from your portfolio.`
+      });
+      loadDashboard();
+    } catch (requestError) {
+      await showErrorAlert('Delete Failed', getApiErrorMessage(requestError, 'Failed to delete property.'));
+    }
+  };
+
   const handleGenerateReminder = async (tenantId) => {
     try {
       const response = await reminderService.generateReminder({ tenantId });
-      await showInfoAlert('AI Reminder Draft', response.reminderText, {
+      await showInfoAlert('AI Reminder Draft', response.reminderText || response.message || '', {
         width: 720
       });
     } catch (requestError) {
@@ -936,6 +982,30 @@ const Dashboard = () => {
       loadDashboard();
     } catch (requestError) {
       await showErrorAlert('Update Failed', getApiErrorMessage(requestError, 'Failed to update the maintenance request.'));
+    }
+  };
+
+  const handleDeleteRepair = async (repairId) => {
+    const confirmed = await confirmAction({
+      title: 'Delete Request?',
+      text: 'Are you sure you want to remove this maintenance request? This action cannot be undone.',
+      confirmButtonText: 'Delete',
+      cancelButtonText: 'Cancel',
+      icon: 'warning'
+    });
+
+    if (!confirmed) return;
+
+    try {
+      await repairService.deleteRepair(repairId);
+      await showToast({
+        icon: 'success',
+        title: 'Request Deleted',
+        text: 'The maintenance ticket has been removed.'
+      });
+      loadDashboard();
+    } catch (requestError) {
+      await showErrorAlert('Delete Failed', getApiErrorMessage(requestError, 'Failed to delete the maintenance request.'));
     }
   };
 
@@ -1154,9 +1224,7 @@ const Dashboard = () => {
           <p>
             {isManagement
               ? 'Manage properties, leases, applications, and collections from one place.'
-              : isStaff
-                ? 'Track assigned maintenance work and stay aligned with management.'
-                : 'Everything you need for your rental stay is here.'}
+              : 'Everything you need for your rental stay is here.'}
           </p>
           {error && <div className="error-msg dashboard-error">{error}</div>}
         </div>
@@ -1467,6 +1535,15 @@ const Dashboard = () => {
                           <Download size={16} /> Download
                         </button>
                       </FloatingHint>
+                      <FloatingHint content="Permanently remove this lease agreement.">
+                        <button
+                          type="button"
+                          className="btn-secondary text-red-500"
+                          onClick={() => handleDeleteLease(lease._id)}
+                        >
+                          Delete
+                        </button>
+                      </FloatingHint>
                     </div>
                   </div>
                 )) : <p className="empty-msg">No leases uploaded yet.</p>}
@@ -1643,6 +1720,15 @@ const Dashboard = () => {
                             Edit
                           </button>
                         </FloatingHint>
+                        <FloatingHint content="Remove this property and all its units from your portfolio permanently.">
+                          <button
+                            onClick={() => handleDeleteProperty(property._id, property.name)}
+                            className="btn-secondary text-red-500"
+                            type="button"
+                          >
+                            Delete
+                          </button>
+                        </FloatingHint>
                       </div>
                     </div>
                   )) : (
@@ -1795,6 +1881,7 @@ const Dashboard = () => {
               newRepair={newRepair}
               onSubmit={handleRepairSubmit}
               onUpdate={handleUpdateRepair}
+              onDelete={handleDeleteRepair}
               properties={properties}
               requests={repairRequests}
               setNewRepair={setNewRepair}
@@ -1953,6 +2040,7 @@ const Dashboard = () => {
             newRepair={newRepair}
             onSubmit={handleRepairSubmit}
             onUpdate={handleUpdateRepair}
+            onDelete={handleDeleteRepair}
             properties={tenantProperties}
             requests={repairRequests}
             setNewRepair={setNewRepair}
@@ -1963,29 +2051,6 @@ const Dashboard = () => {
         </>
       )}
 
-      {isStaff && (
-        <>
-          <AnimatedSection as="div" className="dash-grid" delay={80}>
-            <StatCard icon={<Wrench />} label="Assigned Tickets" value={repairRequests.length} subtext="Maintenance queue" hint="All current maintenance tickets assigned to your role." />
-            <StatCard icon={<Bell />} label="Notifications" value={notifications.length} subtext="Team updates" color="var(--secondary)" hint="Unread notices and workflow updates tied to your account." />
-          </AnimatedSection>
-          <StaffCharts repairs={repairRequests} />
-          <RepairSection
-            canCreate={false}
-            canManage={true}
-            currentPropertyLabel=""
-            newRepair={newRepair}
-            onSubmit={handleRepairSubmit}
-            onUpdate={handleUpdateRepair}
-            properties={[]}
-            requests={repairRequests}
-            setNewRepair={setNewRepair}
-            setShowForm={setShowRepairForm}
-            showForm={false}
-            unitReadonly={false}
-          />
-        </>
-      )}
     </div>
   );
 };

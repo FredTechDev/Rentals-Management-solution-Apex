@@ -10,6 +10,11 @@ const AnimatedSection = ({ as: Tag = 'section', children, className = '', delay 
       return undefined;
     }
 
+    if (typeof IntersectionObserver === 'undefined') {
+      setVisible(true);
+      return undefined;
+    }
+
     const observer = new IntersectionObserver(
       ([entry]) => {
         if (entry.isIntersecting) {

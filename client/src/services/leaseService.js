@@ -25,5 +25,10 @@ export const leaseService = {
       responseType: 'blob'
     });
     return response.data;
+  },
+
+  async deleteLease(leaseId) {
+    const response = await api.delete(`/leases/${leaseId}`);
+    return response.data;
   }
 };

@@ -18,5 +18,10 @@ export const repairService = {
   async updateRepair(id, payload) {
     const response = await api.put(`/repairs/${id}`, payload);
     return response.data;
+  },
+
+  async deleteRepair(id) {
+    const response = await api.delete(`/repairs/${id}`);
+    return response.data;
   }
 };
